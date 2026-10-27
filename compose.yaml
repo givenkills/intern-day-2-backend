@@ -1,0 +1,39 @@
+# 后端独立启动：docker compose up --build
+# 构建上下文就是本仓库根目录，不依赖前端仓库的任何文件。
+name: intern-day-2-backend
+
+services:
+  backend:
+    build:
+      context: .
+    image: intern-day-2-backend:local
+    ports:
+      # 宿主机端口 -> 容器端口；浏览器访问 http://localhost:8000
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      DATABASE_PATH: /data/app.db
+      # 允许哪些前端来源跨域访问，多个用英文逗号分隔
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-120}
+      SEED_ON_STARTUP: ${SEED_ON_STARTUP:-true}
+      SEED_USERNAME: ${SEED_USERNAME:-intern}
+      SEED_PASSWORD: ${SEED_PASSWORD:-intern123456}
+      SEED_DISPLAY_NAME: ${SEED_DISPLAY_NAME:-练习同学}
+      SEED_SAMPLE_TODOS: ${SEED_SAMPLE_TODOS:-true}
+    volumes:
+      # 命名卷保存 SQLite 文件，容器重建后账号和待办仍然存在
+      - backend-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  backend-data:
