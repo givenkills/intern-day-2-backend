@@ -49,7 +49,7 @@ def get_current_user(
     fingerprint = token_fingerprint(credentials.credentials)
     row = conn.execute(
         """
-        SELECT s.expires_at, u.id, u.username, u.display_name, u.created_at
+        SELECT s.expires_at, u.id, u.username, u.phone, u.display_name, u.created_at
         FROM sessions AS s
         JOIN users   AS u ON u.id = s.user_id
         WHERE s.token_fingerprint = ?
@@ -68,6 +68,7 @@ def get_current_user(
     return {
         "id": row["id"],
         "username": row["username"],
+        "phone": row["phone"],
         "display_name": row["display_name"],
         "created_at": row["created_at"],
     }
