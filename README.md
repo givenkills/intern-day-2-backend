@@ -2,7 +2,7 @@
 
 实习生第二天练习的后端仓库：**FastAPI + 不透明会话令牌 + SQLite**，为「待办清单」前端提供登录与数据接口。
 
-- 前端仓库（配套）：`https://github.com/<你的GitHub用户名>/intern-day-2-frontend`
+- 前端仓库（配套）：`https://github.com/givenkills/intern-day-2-frontend`
 - 接口文档（启动后）：<http://localhost:8000/docs>
 - 当前联调分支：`feat/login-and-todo`（两个仓库同分支名）
 
