@@ -1,8 +1,12 @@
 # intern-day-2-backend
 
+> **完整代码在 `feat/login-and-todo` 分支。** `main` 只保留了项目骨架（初始化说明与工程配置）；
+> 接口实现、测试、Docker 配置与自测报告都在功能分支上，评审请直接看 PR：
+> <https://github.com/givenkills/intern-day-2-backend/pull/1>
+
 实习生第二天练习的后端仓库：**FastAPI + SQLite**，为「待办清单」前端提供登录与数据接口。
 
-- 前端仓库（配套）：`https://github.com/<你的GitHub用户名>/intern-day-2-frontend`
+- 前端仓库（配套）：`https://github.com/givenkills/intern-day-2-frontend`
 - 接口文档：<http://localhost:8000/docs>
 
 ## 功能范围（初稿）
