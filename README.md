@@ -1,6 +1,6 @@
 # intern-day-2-backend
 
-实习生第二天练习的后端仓库：**FastAPI + 不透明会话令牌 + SQLite**，为「待办清单」前端提供登录与数据接口。
+实习生第二天练习的后端仓库：**FastAPI + 不透明会话令牌 + SQLite**，提供手机号注册、登录鉴权与待办数据接口，多个账户的数据彼此隔离。
 
 - 前端仓库（配套）：`https://github.com/givenkills/intern-day-2-frontend`
 - 接口文档（启动后）：<http://localhost:8000/docs>
@@ -13,13 +13,15 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 账号密码登录 | 校验数据库中的真实账号与 Argon2 密码哈希，成功签发会话令牌 |
-| 获取当前用户 | 凭令牌返回必要的用户信息（id、账号、显示名、创建时间） |
+| 账号密码登录 | 校验数据库中的真实账号与 Argon2 密码哈希，成功签发会话令牌；账号或手机号都能登录 |
+| 手机号注册 | 手机号 + 短信验证码 + 密码创建**独立账户**，注册成功直接登录；手机号即登录名 |
+| 多账户数据隔离 | 每个账户的待办只有自己能看、能改；用别人的 id 直接调接口返回 `404` |
+| 获取当前用户 | 凭令牌返回必要的用户信息（id、账号、手机号、显示名、创建时间） |
 | 退出登录 | 服务端删除会话，旧令牌立即失效 |
 | 待办清单 | 列出、新增、修改完成状态、删除；**全部要求登录，且只能操作自己的数据** |
 | 健康检查 | `GET /health`，不需要登录，供容器健康检查使用 |
 
-不做的部分（按任务说明无需实现）：注册、找回密码、短信/第三方登录、角色权限。
+不做的部分：找回密码、第三方登录、角色权限。真实短信通道未接入——当前是可替换的模拟实现，见 3.1 节。
 
 ### 验收条件
 
@@ -29,6 +31,8 @@
 4. 令牌过期后访问接口返回 `401`，前端提示重新登录。
 5. 退出登录后再用旧令牌访问 `/todos` 返回 `401`。
 6. 容器重建后，账号与待办数据仍然存在（SQLite 文件在命名卷中）。
+7. 任意 11 位虚构手机号都能注册出新账户；验证码错误、过期、已使用、次数超限都注册不了。
+8. 两个账户分别登录，互相看不到对方的待办；用对方的待办 id 调接口返回 `404`。
 
 ---
 
@@ -37,8 +41,10 @@
 | 方法 | 路径 | 是否需要登录 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/health` | 否 | 返回 `{status, app, version, time}` |
-| POST | `/auth/login` | 否 | 请求体 `{username, password}`，返回 `{access_token, token_type, expires_at}` |
-| GET | `/auth/me` | 是 | 返回 `{id, username, display_name, created_at}` |
+| POST | `/auth/sms/send` | 否 | 请求体 `{phone}`，返回 `{expires_in, resend_after, debug_code, masked_phone}` |
+| POST | `/auth/register` | 否 | 请求体 `{phone, code, password, display_name}`，返回 `201` 与登录令牌 |
+| POST | `/auth/login` | 否 | 请求体 `{username, password}`，`username` 可填账号或手机号；返回 `{access_token, token_type, expires_at}` |
+| GET | `/auth/me` | 是 | 返回 `{id, username, phone, display_name, created_at}` |
 | POST | `/auth/logout` | 是 | 返回 `204`，服务端删除当前会话 |
 | GET | `/todos` | 是 | 返回当前用户的待办数组，未完成为先、新创建的在前 |
 | POST | `/todos` | 是 | 请求体 `{title}`，返回 `201` 与新建的待办 |
@@ -57,12 +63,49 @@ Authorization: Bearer <access_token>
 | --- | --- | --- |
 | `401` | 未携带令牌 / 令牌伪造 / 已过期 / 已退出 | `{"detail": "登录凭证无效或已退出"}` |
 | `401` | 账号或密码错误 | `{"detail": "账号或密码不正确"}` |
+| `400` | 验证码错误 / 已过期 / 未获取 | `{"detail": "验证码不正确，还可尝试 4 次"}` |
+| `409` | 手机号已注册 | `{"detail": "该手机号已注册，请直接登录"}` |
+| `429` | 发送过于频繁 / 验证码错误次数超限 / 当日次数超限 | `{"detail": "发送过于频繁，请 43 秒后重试"}` |
 | `404` | 待办不存在（含别人的待办） | `{"detail": "待办不存在"}` |
-| `422` | 字段缺失、空值、超长 | `{"detail": "请求参数校验失败", "errors": [{"field": "password", "message": "..."}]}` |
+| `422` | 字段缺失、空值、超长、手机号格式不对 | `{"detail": "请求参数校验失败", "errors": [{"field": "phone", "message": "..."}]}` |
 
 ---
 
-## 3. 登录状态方案
+## 3. 账号体系：注册、登录与凭证
+
+### 3.1 手机号注册
+
+注册走「手机号 → 验证码 → 建号」三步：
+
+1. `POST /auth/sms/send`：校验手机号格式后生成 6 位验证码（`secrets.randbelow`），写入 `verification_codes` 表。
+2. `POST /auth/register`：校验验证码，通过后创建账户。
+   - `username` 与 `phone` 都取手机号，所以**手机号就是登录名**，昵称可重复、不参与唯一性。
+   - 手机号上有**部分唯一索引**（`WHERE phone IS NOT NULL`），所以初始化脚本建的练习账号（无手机号）不会冲突。
+   - 并发注册同一手机号由唯一索引兜底，返回 `409`。
+3. 注册成功直接签发会话，前端不用再登录一次。
+
+验证码的约束（都在 `app/sms.py`）：
+
+| 规则 | 默认值 | 配置项 |
+| --- | --- | --- |
+| 有效期 | 5 分钟 | `SMS_CODE_TTL_SECONDS` |
+| 同一手机号发送间隔 | 60 秒 | `SMS_RESEND_SECONDS` |
+| 单个验证码最多输错 | 5 次 | `SMS_MAX_ATTEMPTS` |
+| 同一手机号 24 小时发送上限 | 10 次 | `SMS_DAILY_LIMIT` |
+| 一次性使用 | 校验通过即写 `consumed_at`，不能复用 | — |
+
+**验证码不落明文**：库里存的是 `HMAC-SHA256(APP_SECRET, "手机号:验证码")`，密钥不在数据库中，泄露数据库也反推不出验证码。
+
+**关于短信通道**：本项目**没有接入真实短信服务**。`app/sms.py` 里定义了 `SmsSender` 协议，默认实现 `ConsoleSmsSender` 只把验证码写到后端日志：
+
+```bash
+docker compose logs --tail=20 backend | grep SMS
+```
+
+开发模式下（`SMS_DEBUG_RETURN_CODE=true`）响应里还会带 `debug_code`，前端直接显示在页面上，方便自测与演示。
+**上线前必须把 `SMS_DEBUG_RETURN_CODE` 设为 `false`**，并实现一个真实的 `SmsSender`（在 `send` 方法里调用云厂商 SDK），其余注册逻辑不用改动。
+
+### 3.2 登录凭证
 
 **后端签发不透明随机令牌，服务端保存会话。**
 
@@ -82,11 +125,14 @@ Authorization: Bearer <access_token>
 
 | 数据 | 存放位置 | 容器重建后 |
 | --- | --- | --- |
-| 用户（含密码哈希） | SQLite `users` 表 | 保留（卷 `backend-data` 挂载到 `/data`） |
+| 用户（含密码哈希、手机号） | SQLite `users` 表 | 保留（卷 `backend-data` 挂载到 `/data`） |
 | 会话令牌指纹 | SQLite `sessions` 表 | 保留，但令牌本身过期后自然失效 |
 | 待办数据 | SQLite `todos` 表 | 保留 |
+| 验证码（HMAC 哈希） | SQLite `verification_codes` 表 | 保留，但 5 分钟后自然过期 |
 
 执行 `docker compose down -v` 会删除卷，数据才会清空；普通的 `down` / `up` 不影响数据。
+
+新增 `users.phone` 列时不需要手动迁移：`init_db()` 会读 `PRAGMA table_info`，发现缺列就 `ALTER TABLE` 补上，再建唯一索引，老库可以直接升级。
 
 ---
 
@@ -105,7 +151,7 @@ uv --version
 sqlite3 --version
 
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-uv run pytest         # 19 个用例
+uv run pytest         # 33 个用例
 uv run ruff check .
 ```
 
@@ -159,7 +205,9 @@ docker compose up --build -d
 
 ---
 
-## 8. 练习账号
+## 8. 账号
+
+### 8.1 练习账号（初始化脚本创建）
 
 账号与密码通过环境变量配置，**不写在源码里**：
 
@@ -175,13 +223,22 @@ SEED_DISPLAY_NAME=练习同学
 
 ```bash
 docker compose exec backend python -m app.seed
-```
-
-本机开发环境同理：
-
-```bash
+# 本机开发环境同理
 uv run python -m app.seed
 ```
+
+### 8.2 自己注册新账户
+
+打开前端 <http://localhost:5173/register>：
+
+1. 填任意 11 位虚构手机号（例如 `13800138000`，联通/移动号段都行，只要格式对）。
+2. 点「获取验证码」，开发模式下页面会直接显示 6 位验证码；也可以从后端日志看：
+   ```bash
+   docker compose logs --tail=20 backend | grep SMS
+   ```
+3. 填验证码、昵称、密码（≥6 位），提交后自动登录。
+
+注册出来的账户和练习账号完全平级：**各自只能看到自己的待办**。想验证隔离，可以用两个手机号各注册一个，分别登录对比列表。
 
 ---
 
@@ -191,19 +248,31 @@ uv run python -m app.seed
 
 | 检查项 | 操作 | 实际结果 |
 | --- | --- | --- |
-| 单元测试 | `uv run pytest` | 19 passed |
+| 单元测试 | `uv run pytest` | 33 passed |
 | 代码检查 | `uv run ruff check .` | All checks passed |
 | 健康检查 | `curl /health` | `200`，返回 `status: ok` |
 | 正常登录 | `POST /auth/login` | `200`，返回令牌与过期时间 |
 | 错误密码 | `POST /auth/login` | `401`，`账号或密码不正确` |
 | 账号不存在 | `POST /auth/login` | `401`，提示与上一条完全相同 |
 | 空密码 | `POST /auth/login` | `422`，`errors[0].field = password` |
+| 手机号格式 | `POST /auth/sms/send` 传 `12345` / `23800138000` | `422`，`请输入有效的 11 位手机号` |
+| 发送验证码 | `POST /auth/sms/send` 传新手机号 | `200`，返回 `expires_in=300`、`resend_after=60`、掩码手机号 |
+| 发送频控 | 同一手机号连续发两次 | 第二次 `429`，提示「请 N 秒后重试」 |
+| 验证码错误 | `POST /auth/register` 传错码 | `400`，提示剩余可试次数 |
+| 错误次数超限 | 连续错 5 次后再提交 | `429`，`验证码错误次数过多，请重新获取` |
+| 验证码过期 | 把 `expires_at` 改到过去 | `400`，`验证码已过期，请重新获取` |
+| 验证码一次性 | 注册成功后查 `consumed_at` | 已写入时间戳，不能复用 |
+| 重复手机号 | 同一手机号再注册 | `409`，`该手机号已注册，请直接登录` |
+| 弱密码 | 密码传 `123` | `422` |
+| 手机号登录 | `POST /auth/login` 用手机号 + 密码 | `200`，正常签发令牌 |
+| **多账户隔离** | 甲新建待办后，乙查列表 / 改 / 删 | 乙列表为空；改删均 `404`；甲数据不变 |
 | 未带令牌 | `GET /todos` | `401` |
 | 伪造令牌 | `GET /auth/me` 带 `Bearer forged-token-value` | `401` |
 | 令牌过期 | 把会话 `expires_at` 改到过去 | `401`，提示「登录已过期」 |
 | 退出登录 | `POST /auth/logout` → 再请求 `/auth/me` | 退出 `204`，复用令牌 `401` |
 | 越权访问 | 用 A 的令牌改/删 B 的待办 | `404`，B 的数据未变 |
 | CORS 预检 | `OPTIONS /todos` 带 `Origin: http://localhost:5173` | 返回 `access-control-allow-origin` 与 `allow-credentials: true` |
+| 老库迁移 | 用旧库（users 无 phone 列）启动新镜像 | 自动补列并建唯一索引，原 1 个账号 3 条待办完好 |
 | 镜像构建 | `docker build -t intern-day-2-backend:verify .` | 成功，运行期依赖按 `uv.lock` 安装 |
 | 容器启动 | 用该镜像启动并映射端口 | `/health` 返回 `200`，启动时自动建库并创建练习账号 |
 | 容器重建 | 删除容器后用同一个数据卷重建 | 重建前 4 条待办，重建后仍是 4 条，账号可直接登录 |
@@ -216,7 +285,10 @@ uv run python -m app.seed
 
 - 使用 SQLite 单文件，未做并发写优化；练习规模下够用，不适合多实例部署。
 - 令牌保存在浏览器 `localStorage`，存在 XSS 风险；生产环境应改为 HttpOnly Cookie + CSRF 防护。
-- 未实现登录失败次数限制与账号锁定。
+- **短信通道是模拟的**：验证码只写日志、开发模式下还会通过接口返回，生产环境必须换成真实 `SmsSender` 并关闭 `SMS_DEBUG_RETURN_CODE`。
+- 未实现登录失败次数限制与账号锁定（验证码有次数限制，密码登录没有）。
+- 未实现找回密码：忘记密码目前只能删库重建或直接改 `password_hash`。
+- 注册时先消费验证码再插入用户，若插入因并发失败，用户需要重新获取验证码（不影响正确性）。
 - 会话清理只在登录时触发，长期不登录会留下过期记录（不影响正确性）。
 - 服务时间统一用 UTC，前端展示时未做本地时区转换（只显示「已完成/未完成」，不展示时间）。
 
@@ -232,15 +304,16 @@ intern-day-2-backend/
 ├── app/
 │   ├── main.py             # 应用入口、CORS、校验错误处理
 │   ├── config.py           # 环境变量配置
-│   ├── db.py               # SQLite 建表与连接
-│   ├── security.py         # 密码哈希、令牌、时间工具
+│   ├── db.py               # SQLite 建表、轻量迁移与连接
+│   ├── security.py         # 密码哈希、令牌、验证码哈希、时间工具
 │   ├── deps.py             # 数据库连接与登录校验依赖
-│   ├── schemas.py          # 请求/响应模型
+│   ├── schemas.py          # 请求/响应模型、手机号校验
+│   ├── sms.py              # 验证码生成/频控/校验 + 短信通道抽象
 │   ├── seed.py             # 练习账号初始化
 │   └── routers/
-│       ├── auth.py         # 登录 / 当前用户 / 退出
+│       ├── auth.py         # 发送验证码 / 注册 / 登录 / 当前用户 / 退出
 │       └── todos.py        # 待办增删改查
-├── tests/                  # pytest 用例
+├── tests/                  # pytest 用例（含多账户隔离）
 ├── Dockerfile              # 运行镜像（多阶段，按 uv.lock 安装）
 ├── compose.yaml            # 独立启动后端
 ├── pyproject.toml
