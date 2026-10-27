@@ -4,6 +4,7 @@
 
 - 前端仓库（配套）：`https://github.com/givenkills/intern-day-2-frontend`
 - 接口文档（启动后）：<http://localhost:8000/docs>
+- 配套 PR：https://github.com/givenkills/intern-day-2-frontend/pull/1
 - 当前联调分支：`feat/login-and-todo`（两个仓库同分支名）
 
 ---
