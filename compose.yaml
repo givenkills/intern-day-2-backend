@@ -20,6 +20,11 @@ services:
       SEED_PASSWORD: ${SEED_PASSWORD:-intern123456}
       SEED_DISPLAY_NAME: ${SEED_DISPLAY_NAME:-练习同学}
       SEED_SAMPLE_TODOS: ${SEED_SAMPLE_TODOS:-true}
+      # 手机验证码：练习环境用模拟通道，验证码会写日志并可通过接口返回
+      APP_SECRET: ${APP_SECRET:-dev-only-please-change-me}
+      SMS_DEBUG_RETURN_CODE: ${SMS_DEBUG_RETURN_CODE:-true}
+      SMS_CODE_TTL_SECONDS: ${SMS_CODE_TTL_SECONDS:-300}
+      SMS_RESEND_SECONDS: ${SMS_RESEND_SECONDS:-60}
     volumes:
       # 命名卷保存 SQLite 文件，容器重建后账号和待办仍然存在
       - backend-data:/data

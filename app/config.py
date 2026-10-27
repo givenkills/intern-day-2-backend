@@ -32,6 +32,20 @@ class Settings(BaseSettings):
     seed_display_name: str = "练习同学"
     seed_sample_todos: bool = True
 
+    # ---- 手机验证码（练习用模拟通道，不接真实短信）----
+    # 验证码的 HMAC 密钥，正式环境必须换成随机值并从环境变量注入。
+    app_secret: str = "dev-only-please-change-me"
+    # 开发模式下把验证码一起返回给前端，方便自测和演示；上线必须设成 false。
+    sms_debug_return_code: bool = True
+    # 验证码有效期（秒）
+    sms_code_ttl_seconds: int = 300
+    # 同一手机号两次发送的最小间隔（秒）
+    sms_resend_seconds: int = 60
+    # 单个验证码最多允许输错的次数
+    sms_max_attempts: int = 5
+    # 同一手机号 24 小时内最多发送次数
+    sms_daily_limit: int = 10
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
