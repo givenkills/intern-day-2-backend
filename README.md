@@ -101,7 +101,7 @@ docker compose up --build                # 本仓库，端口 8000
 | 伪造令牌 | 带随机字符串 | **通过**：`401 {"detail":"登录凭证无效或已退出"}` |
 | 退出后调用 | 退出再用旧令牌 | **通过**：`401` |
 | 会话隔离 | 第二个账号（手机号 13900000000 系列）登录后问同样的问题 | **通过**：工具返回 `{"owner":"隔离测试","total":0}`，看不到第一个账号的数据 |
-| 容器复现 | 按 README 启动 | **待验证**：本机 Docker Desktop 未运行，未做容器内复现 |
+| 容器复现 | 建共享网络 → 两个仓库 `compose up -d` | **通过**：三个容器 healthy，容器内登录 / 对话 / 工具调用 / 401 全部复测 |
 
 复现命令（后端需先启动，且 `.env` 里已配好 `QWEN_API_KEY`）：
 
@@ -112,6 +112,48 @@ uv run python scripts/check_agent.py
 脚本会依次验证：未登录被拒 → 第一轮流式回复 → 第二轮记住昵称 → 第三轮触发工具。
 
 浏览器侧演示截图见前端仓库 `docs/screenshots/day3-agent-chat.jpg`。
+
+### 容器内复测（2026-10-28）
+
+为避免与本机直跑的进程抢端口，验证时把宿主机端口错开（容器内部端口不变，容器间仍用 `backend:8000` 与共享网络）：
+
+| 宿主机端口 | 映射到 | 服务 |
+| --- | --- | --- |
+| 8010 | 8000 | backend |
+| 8790 | 8787 | runtime |
+| 5180 | 5173 | frontend |
+
+```bash
+docker network create intern-agent-net
+
+# 后端
+BACKEND_PORT=8010 CORS_ORIGINS=http://localhost:5180 docker compose up -d --wait
+
+# 前端
+FRONTEND_PORT=5180 RUNTIME_PORT=8790 \
+AGENT_URL=http://backend:8000/agent \
+VITE_API_BASE_URL=http://localhost:8010 \
+VITE_COPILOT_RUNTIME_URL=http://localhost:8790/copilotkit \
+RUNTIME_CORS_ORIGINS=http://localhost:5180 \
+docker compose up -d --wait
+```
+
+实测结果：
+
+```
+backend health: 200 ok
+login ok
+无令牌经 Runtime -> RUN_ERROR: HTTP 401: {"detail":"未登录或缺少登录凭证"}
+带令牌 -> 事件总数 27，首事件 20ms，末事件 3203ms
+         文本增量 12 个，间隔 最小 0ms / 中位 2ms / 最大 203ms   ← 不是一次性返回
+         工具调用 True
+容器库内新建待办后追问 -> 工具返回 {"owner":"练习同学","total":1,"open":1,...}
+                        回答与数据库内容一致
+```
+
+流式间隔中位数 2ms、最大 203ms、整体跨 3.2 秒，说明事件是陆续到达的，没有被任何一层缓冲后再一次性吐出。
+
+前端截图（容器版本）：`intern-day-2-frontend/docs/screenshots/day3-agent-chat-container.jpg`
 
 ### 验证记录（2026-10-28）
 
