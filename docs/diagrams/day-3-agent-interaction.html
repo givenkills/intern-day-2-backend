@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>第三天 Agent 交互链路</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { width: 1500px; font-family: "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif; }
+  svg { display: block; }
+  .t  { font-size: 13px; fill: #1f2937; }
+  .ts { font-size: 12px; fill: #4b5563; }
+  .tm { font-size: 11.5px; fill: #374151; }
+  .th { font-size: 13.5px; font-weight: 600; fill: #111827; }
+  .cap { font-size: 12.5px; fill: #374151; }
+  .warn { font-size: 11.5px; fill: #a32d2d; }
+</style>
+</head>
+<body>
+<svg width="1500" height="1170" viewBox="0 0 1500 1170" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1500" height="1170" fill="#ffffff"/>
+
+  <text class="th" x="40" y="42" style="font-size:17px">第三天：前端 — API — Agent 实际交互链路</text>
+  <text class="ts" x="40" y="66">与仓库代码一致：CopilotKit 1.82 / agent-framework-ag-ui 1.7 / 千问 qwen3.8-flash（DashScope 兼容模式）</text>
+
+  <!-- 分区背景 -->
+  <rect x="30" y="92" width="200" height="880" rx="14" fill="#fafafa" stroke="#e5e7eb" stroke-width="1"/>
+  <rect x="250" y="92" width="600" height="880" rx="14" fill="#f7f9fc" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="870" y="92" width="390" height="880" rx="14" fill="#f7f9fc" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="1280" y="92" width="190" height="880" rx="14" fill="#fafafa" stroke="#e5e7eb" stroke-width="1"/>
+
+  <text class="ts" x="42" y="112" style="fill:#6b7280">宿主机（浏览器）</text>
+  <text class="ts" x="262" y="112" style="fill:#6b7280">Compose 项目 1：intern-day-2-frontend</text>
+  <text class="ts" x="882" y="112" style="fill:#6b7280">Compose 项目 2：intern-day-2-backend</text>
+
+  <!-- 参与者表头 -->
+  <g>
+    <rect x="45" y="128" width="150" height="62" rx="9" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+    <text class="th" x="120" y="152" text-anchor="middle">用户</text>
+    <text class="ts" x="120" y="172" text-anchor="middle">localhost:5173</text>
+  </g>
+  <g>
+    <rect x="278" y="128" width="244" height="62" rx="9" fill="#e6f1fb" stroke="#185fa5" stroke-width="1"/>
+    <text class="th" x="400" y="150" text-anchor="middle">React 页面 + CopilotKit</text>
+    <text class="ts" x="400" y="170" text-anchor="middle">/assistant · CopilotChat</text>
+  </g>
+  <g>
+    <rect x="578" y="128" width="224" height="62" rx="9" fill="#e6f1fb" stroke="#185fa5" stroke-width="1"/>
+    <text class="th" x="690" y="150" text-anchor="middle">CopilotKit Runtime</text>
+    <text class="ts" x="690" y="170" text-anchor="middle">Express · localhost:8787</text>
+  </g>
+  <g>
+    <rect x="856" y="128" width="268" height="62" rx="9" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+    <text class="th" x="990" y="150" text-anchor="middle">FastAPI + Agent Framework</text>
+    <text class="ts" x="990" y="170" text-anchor="middle">POST /agent · backend:8000</text>
+  </g>
+  <g>
+    <rect x="1240" y="128" width="180" height="62" rx="9" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+    <text class="th" x="1330" y="150" text-anchor="middle">千问模型</text>
+    <text class="ts" x="1330" y="170" text-anchor="middle">DashScope HTTPS</text>
+  </g>
+
+  <!-- 生命线 -->
+  <g stroke="#cbd5e1" stroke-width="1" stroke-dasharray="3 5">
+    <line x1="120" y1="190" x2="120" y2="955"/>
+    <line x1="400" y1="190" x2="400" y2="955"/>
+    <line x1="690" y1="190" x2="690" y2="955"/>
+    <line x1="990" y1="190" x2="990" y2="955"/>
+    <line x1="1330" y1="190" x2="1330" y2="955"/>
+  </g>
+
+  <!-- ① 用户输入 -->
+  <line x1="120" y1="228" x2="392" y2="228" stroke="#185fa5" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text class="tm" x="130" y="220">输入问题，点击发送</text>
+
+  <!-- ② 浏览器 -> Runtime -->
+  <line x1="400" y1="285" x2="682" y2="285" stroke="#185fa5" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text class="tm" x="410" y="277">① POST /copilotkit/agent/:agentId/run</text>
+  <text class="warn" x="410" y="300">带 Authorization: Bearer &lt;登录令牌&gt;</text>
+
+  <!-- ③ Runtime -> FastAPI -->
+  <line x1="690" y1="348" x2="982" y2="348" stroke="#185fa5" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text class="tm" x="700" y="340">② POST /agent（AG-UI RunAgentInput）</text>
+  <text class="warn" x="700" y="363">同一个 Authorization 原样透传</text>
+
+  <!-- ④ 鉴权（自调用） -->
+  <path d="M990 405 L1062 405 L1062 425 L998 425" fill="none" stroke="#0f6e56" stroke-width="1.3" marker-end="url(#ar)"/>
+  <text class="tm" x="1072" y="406">③ 校验令牌：查 sessions 表</text>
+  <text class="tm" x="1072" y="424">无效 / 过期 → 401，事件流不建立</text>
+
+  <!-- ⑤ 组装 -->
+  <path d="M990 465 L1062 465 L1062 485 L998 485" fill="none" stroke="#0f6e56" stroke-width="1.3" marker-end="url(#ar)"/>
+  <text class="tm" x="1072" y="466">④ Agent 组装 messages + tools</text>
+  <text class="tm" x="1072" y="484">身份写入 ContextVar</text>
+
+  <!-- ⑥ Agent -> 模型 -->
+  <line x1="990" y1="528" x2="1322" y2="528" stroke="#185fa5" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text class="tm" x="1000" y="520">⑤ chat.completions(stream=true, tools)</text>
+
+  <!-- ⑦ 模型 -> Agent -->
+  <line x1="1330" y1="572" x2="998" y2="572" stroke="#64748b" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+  <text class="tm" x="1008" y="564">⑥ 文本增量 / tool_calls</text>
+
+  <!-- ⑧ 工具 -->
+  <path d="M990 618 L1062 618 L1062 638 L998 638" fill="none" stroke="#0f6e56" stroke-width="1.3" marker-end="url(#ar)"/>
+  <text class="tm" x="1072" y="619">⑦ 执行 list_my_todos（只读）</text>
+  <text class="tm" x="1072" y="637">SQL：WHERE user_id = 令牌对应用户</text>
+
+  <!-- ⑨ 再请求 -->
+  <line x1="990" y1="682" x2="1322" y2="682" stroke="#185fa5" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text class="tm" x="1000" y="674">⑧ 带工具结果再次请求模型</text>
+
+  <!-- ⑩ 最终增量 -->
+  <line x1="1330" y1="726" x2="998" y2="726" stroke="#64748b" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+  <text class="tm" x="1008" y="718">⑨ 最终文本增量</text>
+
+  <!-- ⑪ 事件流返回 -->
+  <line x1="990" y1="778" x2="698" y2="778" stroke="#0f6e56" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="tm" x="742" y="770">⑩ 200 text/event-stream</text>
+  <text class="tm" x="742" y="793">RUN_STARTED / TEXT_MESSAGE_CONTENT /</text>
+  <text class="tm" x="742" y="810">TOOL_CALL_* / RUN_FINISHED</text>
+
+  <!-- ⑫ 转发 -->
+  <line x1="690" y1="846" x2="408" y2="846" stroke="#0f6e56" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="tm" x="430" y="838">⑪ 逐条转发，不整段缓冲</text>
+
+  <!-- ⑬ 更新 -->
+  <line x1="400" y1="892" x2="128" y2="892" stroke="#0f6e56" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="tm" x="150" y="884">⑫ 气泡逐步变长，结束转空闲</text>
+
+  <!-- 异常路径 -->
+  <line x1="990" y1="918" x2="408" y2="918" stroke="#a32d2d" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#ar)"/>
+  <text class="warn" x="430" y="910">异常 A：未登录 / 令牌过期 → 401 在建流前拒绝；Runtime 已开流，浏览器收到 RUN_ERROR</text>
+  <line x1="990" y1="952" x2="408" y2="952" stroke="#a32d2d" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#ar)"/>
+  <text class="warn" x="430" y="944">异常 B：模型报错 / 后端不可用 → RUN_ERROR；前端结束加载态并提示失败</text>
+
+  <!-- CopilotKit 职责备注 -->
+  <rect x="414" y="430" width="248" height="178" rx="9" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <text class="tm" x="428" y="452" style="font-weight:600;fill:#111827">这一层由 CopilotKit 负责</text>
+  <text class="tm" x="428" y="476">· 维护消息列表与自动滚动</text>
+  <text class="tm" x="428" y="500">· 把 AG-UI 事件渲染成气泡</text>
+  <text class="tm" x="428" y="524">· 发送中 / 失败 / 停止状态</text>
+  <text class="tm" x="428" y="548">· 每个请求注入 Authorization</text>
+  <text class="tm" x="428" y="578" style="fill:#6b7280">自己写输入框要多做：</text>
+  <text class="tm" x="428" y="596" style="fill:#6b7280">协议设计 + 流解析 + 工具状态</text>
+
+  <!-- 图注 -->
+  <rect x="30" y="990" width="1440" height="160" rx="12" fill="#fbfbfd" stroke="#e5e7eb" stroke-width="1"/>
+  <text class="cap" x="48" y="1014" style="font-weight:600;fill:#111827">图注（与代码一致）</text>
+  <text class="cap" x="48" y="1038">接口：① POST http://localhost:8787/copilotkit/agent/todo_assistant/run（CopilotKit 多路由，浏览器 SSE）　② POST http://backend:8000/agent（AG-UI，请求体 RunAgentInput，响应 text/event-stream）</text>
+  <text class="cap" x="48" y="1060">运行位置：浏览器 → frontend 容器 :5173；Runtime → runtime 容器 :8787；Agent → backend 容器 :8000；模型 → DashScope 兼容端点（HTTPS，非流式以外的外部服务）</text>
+  <text class="cap" x="48" y="1082">网络：两个 Compose 项目共用外部网络 intern-agent-net，Runtime 用服务名 backend 解析后端；浏览器只能访问宿主机端口，访问不到容器服务名</text>
+  <text class="cap" x="48" y="1104">认证：登录令牌由后端签发，浏览器存 localStorage，每次请求放 Authorization；Runtime 不解析不缓存，只有 FastAPI 的 authorization_scope_resolver 校验</text>
+  <text class="cap" x="48" y="1126">密钥：QWEN_API_KEY 只在 backend 容器环境变量里，不经过浏览器、Runtime 与聊天消息</text>
+  <text class="cap" x="48" y="1145" style="fill:#6b7280">错误路径：鉴权失败 → 401 JSON；运行中失败（模型报错、后端不可用）→ RUN_ERROR 事件，前端结束加载态并提示</text>
+</svg>
+</body>
+</html>
