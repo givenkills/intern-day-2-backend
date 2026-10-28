@@ -46,9 +46,23 @@ class Settings(BaseSettings):
     # 同一手机号 24 小时内最多发送次数
     sms_daily_limit: int = 10
 
+    # ---- 模型服务：千问（DashScope 的 OpenAI 兼容模式）----
+    # 密钥只从后端环境变量读取，不会出现在代码、镜像构建参数或前端环境变量里。
+    qwen_api_key: str = ""
+    # DashScope 兼容模式地址；换成其他 OpenAI 兼容服务时只改这里。
+    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_model: str = "qwen-plus"
+    # 只读工具一次最多返回多少条待办，避免把整库塞进上下文。
+    agent_tool_todo_limit: int = 20
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def agent_ready(self) -> bool:
+        """没有配置密钥时不注册 Agent 接口，避免带着空密钥去调用模型服务。"""
+        return bool(self.qwen_api_key.strip())
 
 
 @lru_cache
