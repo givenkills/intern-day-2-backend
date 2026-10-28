@@ -9,6 +9,9 @@ dependencies = [
     "uvicorn[standard]>=0.30,<1.0",
     "pydantic-settings>=2.4,<3.0",
     "pwdlib[argon2]>=0.2,<1.0",
+    # 只装需要的连接器：agent-framework 是元包，会把 Azure/Anthropic/Gemini 等全部拉进来
+    "agent-framework-ag-ui>=1.7.0",
+    "agent-framework-openai>=1.17.0",
 ]
 
 [dependency-groups]
