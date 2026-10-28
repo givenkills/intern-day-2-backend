@@ -4,8 +4,8 @@
 
 - 前端仓库（配套）：`https://github.com/givenkills/intern-day-2-frontend`
 - 接口文档（启动后）：<http://localhost:8000/docs>
-- 配套 PR：https://github.com/givenkills/intern-day-2-frontend/pull/1
-- 当前联调分支：`feat/login-and-todo`（两个仓库同分支名）
+- 配套 PR：后端 [#2](https://github.com/givenkills/intern-day-2-backend/pull/2) · 前端 [#2](https://github.com/givenkills/intern-day-2-frontend/pull/2)（均已合并）
+- 当前分支：`main`（第二天与第三天的改动都已合并，分阶段 commit 完整保留）
 
 ---
 
@@ -15,7 +15,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 功能分支 | `feat/agent-chat`（两个仓库同名） |
+| 功能分支 | `feat/agent-chat` → 已合并至 `main` |
 | Agent 名称 | `todo_assistant`（前端 Runtime 的 agents 键、Provider 的 agentId 都用这个名字） |
 | Agent 接口 | `POST /agent`，AG-UI 协议，`text/event-stream` 流式返回 |
 | 只读工具 | `list_my_todos`：查询**当前登录用户**自己的待办 |
