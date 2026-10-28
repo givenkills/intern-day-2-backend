@@ -9,6 +9,176 @@
 
 ---
 
+## 第三天新增：Agent 与 AG-UI 接入
+
+在第二天的登录与待办之上，加了一个可以在浏览器里对话的 Agent。登录、获取当前用户、退出登录、待办增删改查全部保持原样。
+
+| 项 | 值 |
+| --- | --- |
+| 功能分支 | `feat/agent-chat`（两个仓库同名） |
+| Agent 名称 | `todo_assistant`（前端 Runtime 的 agents 键、Provider 的 agentId 都用这个名字） |
+| Agent 接口 | `POST /agent`，AG-UI 协议，`text/event-stream` 流式返回 |
+| 只读工具 | `list_my_todos`：查询**当前登录用户**自己的待办 |
+| 模型 | 千问 `qwen3.8-flash`，走 DashScope 的 OpenAI 兼容端点 |
+| 原理说明 | [`docs/day-3-agent-learning.md`](docs/day-3-agent-learning.md) |
+| 交互图 | [`docs/diagrams/day-3-agent-interaction.png`](docs/diagrams/day-3-agent-interaction.png) |
+
+### 接口
+
+`POST /agent`
+
+- 请求头：`Authorization: Bearer <登录令牌>`、`Content-Type: application/json`
+- 请求体：AG-UI 的 `RunAgentInput`（`threadId`、`runId`、`messages` 等）
+- 响应：`200 text/event-stream`，事件依次为 `RUN_STARTED` → `TEXT_MESSAGE_*` / `TOOL_CALL_*` → `RUN_FINISHED`
+- 未登录 / 令牌过期：**在建流之前**返回 `401 application/json`，不会产生模型调用
+
+鉴权用的是 AG-UI 适配包提供的 `authorization_scope_resolver`（一个普通 FastAPI 依赖），它做了两件事：
+
+1. 用与 `/todos` 完全相同的 `authenticate_token()` 校验令牌；
+2. 把校验出的用户写进 `ContextVar`，工具执行时只按这个身份查库；返回值 `user:<id>` 同时作为 thread 快照的归属范围。
+
+工具签名里**没有** `user_id` 参数，模型无法指定查谁的数据。
+
+### 环境变量
+
+新增 4 个，全部只影响 Agent，不影响登录与待办：
+
+| 变量 | 说明 | 示例（占位） |
+| --- | --- | --- |
+| `QWEN_API_KEY` | 模型密钥，**只放后端** | `sk-xxxxxxxx` |
+| `QWEN_BASE_URL` | OpenAI 兼容端点 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `QWEN_MODEL` | 模型名 | `qwen3.8-flash` |
+| `AGENT_TOOL_TODO_LIMIT` | 工具一次最多返回多少条 | `20` |
+
+`QWEN_API_KEY` 留空时 `/agent` **不会注册**（日志里有一条 warning），登录与待办功能完全不受影响，也不会带着空密钥去调用模型服务。
+
+密钥不出现在：代码、`.env.example`、`compose.yaml` 的字面值、镜像构建参数、前端任何环境变量、聊天消息。
+
+### 依赖
+
+只装三个包，**不要装 `agent-framework` 元包**——它会把 Azure / Anthropic / Gemini / Qdrant / mem0 全部拉进来（解析出 227 个包，仅 `claude-agent-sdk` 就 123 MB）。
+
+```toml
+"agent-framework-ag-ui>=1.7.0",
+"agent-framework-openai>=1.17.0",
+```
+
+实际安装版本：`agent-framework-core 1.23.0`、`agent-framework-ag-ui 1.7.0`、`agent-framework-openai 1.17.0`、`ag-ui-protocol 0.1.22`、`openai 3.40.0`。锁文件见 `uv.lock`。
+
+### 容器与网络
+
+后端 Compose 增加了外部网络 `intern-agent-net`。前端仓库的 Runtime 容器在这个网络里用服务名 `backend:8000` 访问本服务。
+
+```bash
+docker network create intern-agent-net   # 两个仓库启动前各执行一次
+docker compose up --build                # 本仓库，端口 8000
+```
+
+不建这个网络，`docker compose up` 会直接报网络不存在——这是刻意的，避免悄悄启动一个别人连不上的服务。
+
+### 会话行为（刷新、重启、换账号）
+
+| 场景 | 行为 |
+| --- | --- |
+| 同一页面连续追问 | 上下文有效：浏览器每次把完整消息历史放进请求体 |
+| 刷新页面 | 前端消息列表清空，历史不再发送；**后端本来就不存**，所以没有残留 |
+| 后端重启 | 对上下文无影响（不落库）；登录令牌仍在 SQLite 里，未过期就还能用 |
+| 点「新建对话」 | 生成新 `threadId`，Provider 重新挂载，客户端消息清空 |
+| 退出 / 换账号 | 清 `localStorage` 令牌，并按 user id 分开存放的 `threadId` 不会串 |
+
+`threadId` **不是**登录凭证：换成别人的 `threadId`，请求依然以你自己的身份执行；鉴权只看 `Authorization`。
+
+### 自测结果
+
+| 检查项 | 方式 | 结果 |
+| --- | --- | --- |
+| 既有功能 | 登录 → 待办增删改 → 退出 | 通过（第二天用例未改动） |
+| Agent 对话 | 登录后提问 | **通过**：`qwen3.8-flash` 返回真实回答 |
+| 流式输出 | 观察 SSE 是否逐条到达 | **通过**：一次回答收到 20+ 个 `TEXT_MESSAGE_CONTENT`，间隔几十毫秒而非最后一次性出现 |
+| 多轮上下文 | 第一轮让其记住虚构昵称，第二轮追问 | **通过**：第二轮正确答出「小海豹」 |
+| 工具调用 | 问「我还有哪些待办没做完」 | **通过**：`TOOL_CALL_RESULT` 带回数据库里的 2 条真实待办，回答与之一致 |
+| 未登录访问 | `curl -X POST /agent` 不带令牌 | **通过**：`401 {"detail":"未登录或缺少登录凭证"}`，无模型调用 |
+| 伪造令牌 | 带随机字符串 | **通过**：`401 {"detail":"登录凭证无效或已退出"}` |
+| 退出后调用 | 退出再用旧令牌 | **通过**：`401` |
+| 会话隔离 | 第二个账号（手机号 13900000000 系列）登录后问同样的问题 | **通过**：工具返回 `{"owner":"隔离测试","total":0}`，看不到第一个账号的数据 |
+| 异常处理 | 停掉后端容器后发送消息 | **通过**：页面顶部提示「连不上后端服务」，加载态结束；恢复容器后同一会话重新发送即可正常回答 |
+| 容器复现 | 建共享网络 → 两个仓库 `compose up -d` | **通过**：三个容器 healthy，容器内登录 / 对话 / 工具调用 / 401 全部复测 |
+
+复现命令（后端需先启动，且 `.env` 里已配好 `QWEN_API_KEY`）：
+
+```bash
+uv run python scripts/check_agent.py
+```
+
+脚本会依次验证：未登录被拒 → 第一轮流式回复 → 第二轮记住昵称 → 第三轮触发工具。
+
+浏览器侧演示截图见前端仓库 `docs/screenshots/day3-agent-chat.jpg`。
+
+### 容器内复测（2026-10-28）
+
+为避免与本机直跑的进程抢端口，验证时把宿主机端口错开（容器内部端口不变，容器间仍用 `backend:8000` 与共享网络）：
+
+| 宿主机端口 | 映射到 | 服务 |
+| --- | --- | --- |
+| 8010 | 8000 | backend |
+| 8790 | 8787 | runtime |
+| 5180 | 5173 | frontend |
+
+```bash
+docker network create intern-agent-net
+
+# 后端
+BACKEND_PORT=8010 CORS_ORIGINS=http://localhost:5180 docker compose up -d --wait
+
+# 前端
+FRONTEND_PORT=5180 RUNTIME_PORT=8790 \
+AGENT_URL=http://backend:8000/agent \
+VITE_API_BASE_URL=http://localhost:8010 \
+VITE_COPILOT_RUNTIME_URL=http://localhost:8790/copilotkit \
+RUNTIME_CORS_ORIGINS=http://localhost:5180 \
+docker compose up -d --wait
+```
+
+实测结果：
+
+```
+backend health: 200 ok
+login ok
+无令牌经 Runtime -> RUN_ERROR: HTTP 401: {"detail":"未登录或缺少登录凭证"}
+带令牌 -> 事件总数 27，首事件 20ms，末事件 3203ms
+         文本增量 12 个，间隔 最小 0ms / 中位 2ms / 最大 203ms   ← 不是一次性返回
+         工具调用 True
+容器库内新建待办后追问 -> 工具返回 {"owner":"练习同学","total":1,"open":1,...}
+                        回答与数据库内容一致
+```
+
+流式间隔中位数 2ms、最大 203ms、整体跨 3.2 秒，说明事件是陆续到达的，没有被任何一层缓冲后再一次性吐出。
+
+前端截图（容器版本）：`intern-day-2-frontend/docs/screenshots/day3-agent-chat-container.jpg`
+
+### 验证记录（2026-10-28）
+
+```
+[1/4] 未登录访问 /agent
+  未带令牌：HTTP 401 {"detail":"未登录或缺少登录凭证"}
+[2/4] 登录并开始第一轮
+  收到 28 个事件
+[3/4] 第二轮：追问上一轮说的昵称
+  助手回复：小海豹
+[4/4] 第三轮：触发只读工具
+  · 调用工具 list_my_todos
+  工具返回：{"owner":"练习同学","filter":"open","total":3,"open":2,"returned":2,...}
+  助手回复：你还有 2 件没做完：1. 验证不登录时直接访问功能页会被弹回登录页 …
+```
+
+### 已知问题
+
+1. 对话历史只在浏览器内存里，刷新即丢。任务允许「只保存当前会话」，这里选择了更简的形态，没有做服务端持久化。
+2. `qwen3.8-flash` 是推理模型，兼容端点会额外返回 `reasoning_content`，当前链路没有把它透出成 AG-UI 事件，用户在气泡里只看到最终回答。
+3. Agent 只读、只查待办；不支持新增/删除待办，也没有多 Agent、RAG、MCP。
+
+---
+
 ## 1. 功能范围
 
 | 能力 | 说明 |

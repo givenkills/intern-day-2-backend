@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -15,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .agent.endpoint import register_agent_endpoint
 from .config import get_settings
 from .db import init_db
 from .routers import auth, todos
@@ -23,6 +25,7 @@ from .security import to_iso, utcnow
 from .seed import seed_demo_user
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -81,3 +84,10 @@ def health() -> HealthOut:
 
 app.include_router(auth.router)
 app.include_router(todos.router)
+
+# Agent 走 AG-UI 协议，接口是 POST /agent（SSE 事件流）。
+# 没配模型密钥时不注册：其余功能照常可用，也不会带着空密钥去调用模型服务。
+if settings.agent_ready:
+    register_agent_endpoint(app)
+else:
+    logger.warning("未配置 QWEN_API_KEY，/agent 入口未注册；登录与待办功能不受影响")

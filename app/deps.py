@@ -46,7 +46,16 @@ def get_current_user(
     if credentials is None or not credentials.credentials:
         raise unauthorized("未登录或缺少登录凭证")
 
-    fingerprint = token_fingerprint(credentials.credentials)
+    return authenticate_token(credentials.credentials, conn)
+
+
+def authenticate_token(token: str, conn: sqlite3.Connection) -> dict:
+    """令牌换用户的最小实现。
+
+    放在这里而不是只写在依赖里，是因为 AG-UI 的鉴权入口是普通函数调用，
+    需要和 /todos 走同一套校验逻辑，避免两处规则漂移。
+    """
+    fingerprint = token_fingerprint(token)
     row = conn.execute(
         """
         SELECT s.expires_at, u.id, u.username, u.phone, u.display_name, u.created_at

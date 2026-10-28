@@ -25,9 +25,17 @@ services:
       SMS_DEBUG_RETURN_CODE: ${SMS_DEBUG_RETURN_CODE:-true}
       SMS_CODE_TTL_SECONDS: ${SMS_CODE_TTL_SECONDS:-300}
       SMS_RESEND_SECONDS: ${SMS_RESEND_SECONDS:-60}
+      # 模型服务：密钥只在这里注入，不进镜像、不进前端
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen-plus}
+      AGENT_TOOL_TODO_LIMIT: ${AGENT_TOOL_TODO_LIMIT:-20}
     volumes:
       # 命名卷保存 SQLite 文件，容器重建后账号和待办仍然存在
       - backend-data:/data
+    networks:
+      # 前端仓库的 CopilotKit Runtime 在同一个网络里用服务名 backend 访问它
+      - agent-net
     healthcheck:
       test:
         - CMD
@@ -42,3 +50,10 @@ services:
 
 volumes:
   backend-data:
+
+networks:
+  # 两个仓库分别独立的 Compose 项目，靠这个显式命名的网络互通。
+  # 第一次使用前需要创建：docker network create intern-agent-net
+  agent-net:
+    external: true
+    name: intern-agent-net
