@@ -18,7 +18,7 @@
 | pytest / httpx / ruff | 8.4.2 / 0.28.1 / 0.17.3 |
 | 运行方式 | 本机 `uv run uvicorn app.main:app`，端口 8000；失败场景另起 8001 |
 
-本机 Docker Desktop 未启动，容器回归留到最后一节说明。
+本机 Docker Desktop 为验证容器启动而启动，三容器回归结果见第十节。
 
 `agent_framework` 的评测模块目前标注为 experimental（导入时给出 `[EVALS]` 警告），
 本次按 `LocalEvaluator` / `evaluate_agent` 的官方用法使用，未启用云端评测服务。
@@ -189,3 +189,35 @@ uv run python tests/agent/report.py \
 再动指令，否则又会陷入"改完不知道是变快还是碰巧不忙"。
 
 其次是给 HTTP 类用例加重复（目前 1 次），首字时延这个指标才有意义。
+
+---
+
+## 十、容器回归（2026-10-29 17:20）
+
+两个仓库按 README 的方式独立构建，三容器 healthy，端口 8000 / 5173 / 8787：
+
+```text
+intern-day-2-backend-backend-1    Up (healthy)   0.0.0.0:8000->8000/tcp
+intern-day-2-frontend-frontend-1  Up             0.0.0.0:5173->5173/tcp
+intern-day-2-frontend-runtime-1   Up             0.0.0.0:8787->8787/tcp
+```
+
+**一处容易踩的坑**：Docker Desktop 起来后，第三天的旧容器凭 `restart: unless-stopped`
+自己启动了，端口还是当时错开的 8010/5180/8790，里面是旧代码。只跑 `up -d` 不会重建，
+必须先 `--force-recreate`，否则会拿昨天的镜像"验证"今天的改动。确认方法是看镜像里的代码：
+
+```bash
+docker exec intern-day-2-backend-backend-1 grep -c invalid_status app/agent/tools.py   # 1
+docker exec intern-day-2-backend-backend-1 grep -c "信息不足时不要先查库" app/agent/factory.py  # 1
+```
+
+`scripts/check_acceptance.py --api http://127.0.0.1:8000 --runtime http://127.0.0.1:8787`
+**13/13 通过**，含登录/退出/待办增改删、未登录 401、伪造令牌、真实模型流式、多轮上下文、
+只读工具真实执行、两账号隔离、threadId 不能当凭证。
+
+容器内另跑 E11/E12/E13（未登录、越权、注入）全部通过。
+
+**E14 在容器里不适用**：它需要库里至少两条未完成待办，而容器卷里只有一条；另外
+`checkers.truth()` 读的是本地 SQLite 文件，容器用的是命名卷，两边不是同一个库。
+所以容器这一轮不把 E14 计入，也不拿它当失败。要修的话得让判定器连到被测实例的库，
+属于评测框架的下一步，不是今天的问题。
