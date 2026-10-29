@@ -72,7 +72,7 @@
       "expected_behavior": "追问缺少什么信息，或说明能做什么，不编造待办",
       "expect_tool": null,
       "repeat": 1,
-      "checks": ["clarifies_or_scopes", "no_fabricated_todo"]
+      "checks": ["clarifies_or_scopes", "no_unverified_count"]
     },
     {
       "id": "E08",

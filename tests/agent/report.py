@@ -51,6 +51,11 @@ def case_summary(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def stable_cases(summary: dict[str, dict[str, Any]]) -> int:
+    """重复跑的用例全部通过，才算这条用例稳定通过。"""
+    return sum(1 for v in summary.values() if v["passed"] == v["runs"])
+
+
 def render(records: list[dict[str, Any]], label: str) -> list[str]:
     summary = case_summary(records)
     runs = len(records)
@@ -65,7 +70,7 @@ def render(records: list[dict[str, Any]], label: str) -> list[str]:
         f"### {label}",
         "",
         f"- 运行次数：{runs}，通过 {passed}（{passed / runs:.0%}）",
-        f"- 用例数：{len(summary)}，全部通过 {sum(1 for v in summary.values() if v['passed'] == v['runs'])} 条",
+        f"- 用例数：{len(summary)}，全部通过 {stable_cases(summary)} 条",
         f"- 工具调用正确：{tool_ok}/{tool_expected}",
     ]
     if latencies:
