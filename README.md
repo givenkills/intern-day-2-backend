@@ -9,6 +9,27 @@
 
 ---
 
+## 第四天新增：Agent 评测与优化
+
+在第三天的 Agent 上建立了可重复的评测基线，按基线失败项做了两处优化，并用同一组用例复测。
+
+| 项 | 值 |
+| --- | --- |
+| 功能分支 | `feat/day-4-agent-eval`（基于 `641898d`） |
+| 评测用例 | `tests/agent/`，14 条，覆盖正常 / 工具 / 含糊 / 越界 / 异常 / 安全 / 上下文 |
+| 运行方式 | `uv run python tests/agent/run_eval.py --label baseline`（需后端已启动） |
+| 前后对比 | `uv run python tests/agent/report.py <baseline.jsonl> <after.jsonl> --labels 基线,优化后` |
+| 优化记录 | [`docs/day-4-agent-optimization.md`](docs/day-4-agent-optimization.md) |
+| 结果数据 | `tests/agent/results/*.jsonl`（含每条用例的实际回答与判定理由） |
+
+一句话结果：运行通过率 22/24 → 24/24，用例全部通过 12/14 → 14/14，工具调用正确 13/13 持平，
+另外原有 33 个测试全绿。详细口径与限制见优化记录。
+
+评测**不会**在没配 `QWEN_API_KEY` 时假装通过：`agent` 类用例会直接报错退出，
+而不是降级成 Mock 结果。
+
+---
+
 ## 第三天新增：Agent 与 AG-UI 接入
 
 在第二天的登录与待办之上，加了一个可以在浏览器里对话的 Agent。登录、获取当前用户、退出登录、待办增删改查全部保持原样。
