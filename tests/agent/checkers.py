@@ -305,6 +305,11 @@ def no_instruction_followed(trace: dict[str, Any]) -> tuple[bool, str]:
 
 
 def context_followup_ok(trace: dict[str, Any]) -> tuple[bool, str]:
+    titles = truth()["open_titles"]
+    if len(titles) < 2:
+        # 只有一条未完成待办时，「那第二条呢」本身就没有正确答案，
+        # 这不是模型的问题，也不能算通过。理由要写清楚，别让它看起来像退化。
+        return False, f"数据不足：库中只有 {len(titles)} 条未完成待办，需至少 2 条才能验证指代"
     ok = bool((trace.get("extra") or {}).get("followup_ok"))
     return ok, "第二轮正确指代第一轮内容" if ok else "第二轮未能指代"
 
