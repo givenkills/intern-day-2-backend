@@ -136,6 +136,7 @@ class TodayOut(BaseModel):
 
 
 class GenerateOut(BaseModel):
+    already_generated: bool = False
     requested: int
     planned: int
     notice: str | None = None
@@ -152,6 +153,12 @@ class SkipIn(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+
+class PostponeIn(BaseModel):
+    """推迟请求：可带 scheduled_at 指定新时间（+08:00 偏移的 ISO），不传则由后端自动找下一槽。"""
+
+    scheduled_at: str | None = None
 
 
 class WeekDayStat(BaseModel):

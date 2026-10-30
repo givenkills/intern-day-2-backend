@@ -262,11 +262,21 @@ def generate_today(conn: sqlite3.Connection, user_id: int) -> dict:
     ).fetchall()
     if existing:
         return {
+            "already_generated": True,
             "requested": len(existing),
             "planned": len([r for r in existing if r["status"] == "planned"]),
-            "notice": "当天已生成过安排，直接返回现有结果",
+            "notice": "今天已生成过安排，如需调整可对单条活动推迟或跳过",
             "activities": [_activity_out(r) for r in existing],
         }
+
+    # 当天已跳过的类型不再安排
+    skipped_types = {
+        r["activity_type"]
+        for r in conn.execute(
+            "SELECT activity_type FROM activities WHERE user_id = ? AND plan_date = ? AND status = 'skipped'",
+            (user_id, day),
+        ).fetchall()
+    }
 
     view = _settings_view(conn, user_id)
     result = plan_slots(
@@ -283,7 +293,7 @@ def generate_today(conn: sqlite3.Connection, user_id: int) -> dict:
     now = to_iso(utcnow())
     created: list[dict] = []
     for i, slot in enumerate(result.slots):
-        kind = kind_cycle(i)
+        kind = kinds.kind_cycle_excluding(i, skipped_types)
         scheduled = local_date_to_utc_iso(local_today(), slot.start)
         cursor = conn.execute(
             """
@@ -306,6 +316,7 @@ def generate_today(conn: sqlite3.Connection, user_id: int) -> dict:
 
     conn.commit()
     return {
+        "already_generated": False,
         "requested": result.requested,
         "planned": result.planned,
         "notice": result.notice,
@@ -353,40 +364,56 @@ def skip_activity(conn: sqlite3.Connection, activity_id: int, user_id: int, reas
     return _activity_out(_load_activity(conn, activity_id, user_id))
 
 
-def postpone_activity(conn: sqlite3.Connection, activity_id: int, user_id: int) -> dict:
+def postpone_activity(
+    conn: sqlite3.Connection,
+    activity_id: int,
+    user_id: int,
+    scheduled_at: str | None = None,
+) -> dict:
     """推迟：原记录置 postponed，派生一条新的 planned。
 
-    关键：先算槽，算到了才在同一个事务里改状态 + 插新记录；
-    找不到槽时原记录保持 planned 不变，返回 ok:false。
+    - 传 scheduled_at（+08:00 偏移 ISO）：推迟到用户指定的时间，校验通过才落库。
+    - 不传：自动找下一个可用槽（兜底）。
+
+    关键：先算槽/校验，通过才在同一个事务里改状态 + 插新记录；
+    失败时原记录保持 planned 不变。
     """
     row = _load_activity(conn, activity_id, user_id)
     if row["status"] != "planned":
         _raise_invalid_transition(conn, activity_id, user_id)
 
     view = _settings_view(conn, user_id)
-    occupied = _occupied_of(conn, user_id, row["plan_date"])
-    # 原记录在计算可用槽时也算作占用，避免新时间又撞到原时间
-    after = max(minutes_of_local_iso(row["scheduled_at"]) + MIN_GAP, minutes_of_local_iso(to_iso(utcnow())))
-    slot = next_slot(
-        view.work_start,
-        view.work_end,
-        view.windows,
-        view.quiet,
-        occupied,
-        after,
-        row["duration_minutes"],
-        MIN_GAP,
-    )
-
-    if slot is None:
-        return {
-            "ok": False,
-            "reason": "今日剩余时段不足，无法再推迟",
-            "activity": _activity_out(row),
-        }
-
     now = to_iso(utcnow())
-    scheduled = local_date_to_utc_iso(local_today(), slot.start)
+
+    if scheduled_at is not None:
+        # 用户指定时间：校验 + 冲突检查，通过则用这个时间
+        minutes = _validate_slot_time(view, scheduled_at, ignore_activity_id=activity_id)
+        _validate_no_time_conflict(
+            conn, user_id, row["plan_date"], minutes, row["duration_minutes"], ignore_activity_id=activity_id
+        )
+        scheduled = scheduled_at
+    else:
+        # 自动找下一槽
+        occupied = _occupied_of(conn, user_id, row["plan_date"])
+        after = max(minutes_of_local_iso(row["scheduled_at"]) + MIN_GAP, minutes_of_local_iso(now))
+        slot = next_slot(
+            view.work_start,
+            view.work_end,
+            view.windows,
+            view.quiet,
+            occupied,
+            after,
+            row["duration_minutes"],
+            MIN_GAP,
+        )
+        if slot is None:
+            return {
+                "ok": False,
+                "reason": "今日剩余时段不足，无法再推迟",
+                "activity": _activity_out(row),
+            }
+        scheduled = local_date_to_utc_iso(local_today(), slot.start)
+
     conn.execute(
         "UPDATE activities SET status = 'postponed', updated_at = ? WHERE id = ? AND user_id = ?",
         (now, activity_id, user_id),
@@ -532,6 +559,64 @@ def suggest_slots(conn: sqlite3.Connection, user_id: int, daily_target: int, fro
     }
 
 
+def _validate_slot_time(view: SettingsView, scheduled_utc: str, ignore_activity_id: int | None = None) -> int:
+    """校验一个时间是否可排，返回该时间的本地分钟数；不合法抛 422。
+
+    ignore_activity_id：推迟时忽略原记录自身，避免「改到同一时间」被误判为冲突。
+    """
+    minutes = minutes_of_local_iso(scheduled_utc)
+
+    # 必须落在工作时段内
+    if not (view.work_start <= minutes < view.work_end):
+        raise HTTPException(
+            status_code=422,
+            detail=f"计划时间 {format_time(minutes)} 不在工作时段内",
+        )
+    # 必须落在某个可活动窗口内
+    in_window = any(w.start <= minutes < w.end for w in view.windows)
+    if not in_window:
+        raise HTTPException(
+            status_code=422,
+            detail=f"计划时间 {format_time(minutes)} 不在可活动时段内",
+        )
+    # 不得落在免打扰时段内
+    for q in view.quiet:
+        if q.start <= minutes < q.end:
+            quiet_range = f"{format_time(q.start)}-{format_time(q.end)}"
+            raise HTTPException(
+                status_code=422,
+                detail=f"计划时间 {format_time(minutes)} 与免打扰时段（{quiet_range}）冲突",
+            )
+    return minutes
+
+
+def _validate_no_time_conflict(
+    conn: sqlite3.Connection,
+    user_id: int,
+    plan_date: str,
+    minutes: int,
+    duration: int,
+    ignore_activity_id: int | None = None,
+) -> None:
+    """校验该时间不与当天其它 planned 活动冲突（± min_gap）。冲突抛 422。"""
+    rows = conn.execute(
+        "SELECT id, scheduled_at, duration_minutes FROM activities "
+        "WHERE user_id = ? AND plan_date = ? AND status = 'planned'",
+        (user_id, plan_date),
+    ).fetchall()
+    for r in rows:
+        if ignore_activity_id is not None and r["id"] == ignore_activity_id:
+            continue
+        other_start = minutes_of_local_iso(r["scheduled_at"])
+        other_end = other_start + r["duration_minutes"]
+        this_end = minutes + duration
+        if minutes < other_end + MIN_GAP and other_start < this_end + MIN_GAP:
+            raise HTTPException(
+                status_code=422,
+                detail=f"计划时间 {format_time(minutes)} 与已有安排（{format_time(other_start)}）冲突",
+            )
+
+
 def confirm_slots(conn: sqlite3.Connection, user_id: int, slots: list[dict]) -> dict:
     """用户确认后保存 Agent 建议。每个时间都重新校验一遍，防前端/模型篡改。"""
     if not slots:
@@ -544,29 +629,8 @@ def confirm_slots(conn: sqlite3.Connection, user_id: int, slots: list[dict]) -> 
     created: list[dict] = []
     for slot in slots:
         scheduled_utc = slot["scheduled_at"]
-        minutes = minutes_of_local_iso(scheduled_utc)
-
-        # 校验：必须落在工作时段内
-        if not (view.work_start <= minutes < view.work_end):
-            raise HTTPException(
-                status_code=422,
-                detail=f"计划时间 {format_time(minutes)} 不在工作时段内",
-            )
-        # 校验：必须落在某个可活动窗口内
-        in_window = any(w.start <= minutes < w.end for w in view.windows)
-        if not in_window:
-            raise HTTPException(
-                status_code=422,
-                detail=f"计划时间 {format_time(minutes)} 不在可活动时段内",
-            )
-        # 校验：不得落在免打扰时段内
-        for q in view.quiet:
-            if q.start <= minutes < q.end:
-                quiet_range = f"{format_time(q.start)}-{format_time(q.end)}"
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"计划时间 {format_time(minutes)} 与免打扰时段（{quiet_range}）冲突",
-                )
+        minutes = _validate_slot_time(view, scheduled_utc)
+        _validate_no_time_conflict(conn, user_id, day.isoformat(), minutes, 5)
 
         activity_type = slot.get("activity_type", "walk")
         if not kinds.is_valid_type(activity_type):

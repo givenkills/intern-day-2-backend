@@ -47,3 +47,13 @@ def kind_of(activity_type: str) -> ActivityKind:
 def kind_cycle(index: int) -> ActivityKind:
     """按序号轮转取活动，用于把每天 N 次均匀分配到不同活动。"""
     return ACTIVITY_KINDS[index % len(ACTIVITY_KINDS)]
+
+
+def kind_cycle_excluding(index: int, excluded_types: set[str]) -> ActivityKind:
+    """轮转取活动，但跳过 excluded_types 里的类型。
+
+    当天被「跳过」的活动类型不再安排；若所有类型都被排除则退回轮转（至少得安排一个）。
+    """
+    available = [k for k in ACTIVITY_KINDS if k.type not in excluded_types]
+    pool = available if available else list(ACTIVITY_KINDS)
+    return pool[index % len(pool)]

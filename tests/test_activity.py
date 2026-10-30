@@ -251,6 +251,52 @@ def test_postpone_keeps_same_day(client, auth_headers):
     assert resp.json()["activity"]["plan_date"] == activity["plan_date"]
 
 
+def test_postpone_to_custom_time(client, auth_headers):
+    """推迟到用户指定的时间，落在可活动窗口内应成功。"""
+    activity = _generate_one(client, auth_headers)
+    day = activity["plan_date"]
+    resp = client.post(
+        f"/activity/{activity['id']}/postpone",
+        json={"scheduled_at": f"{day}T16:00:00+08:00"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["activity"]["postponed_from_id"] == activity["id"]
+    assert data["activity"]["scheduled_at"] == f"{day}T16:00:00+08:00"
+
+
+def test_postpone_to_quiet_hours_rejected(client, auth_headers):
+    """推迟到免打扰时段应被 422 拒绝，且原记录不变。"""
+    activity = _generate_one(client, auth_headers)
+    day = activity["plan_date"]
+    resp = client.post(
+        f"/activity/{activity['id']}/postpone",
+        json={"scheduled_at": f"{day}T12:30:00+08:00"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+    # 原记录仍是 planned
+    today = client.get("/activity/today", headers=auth_headers).json()
+    original = next(a for a in today["activities"] if a["id"] == activity["id"])
+    assert original["status"] == "planned"
+
+
+def test_postpone_to_conflicting_time_rejected(client, auth_headers):
+    """推迟到与另一条 planned 冲突的时间应被 422 拒绝。"""
+    activity = _generate_one(client, auth_headers)
+    # 找另一条 planned 活动的时间
+    today = client.get("/activity/today", headers=auth_headers).json()
+    other = next(a for a in today["activities"] if a["id"] != activity["id"] and a["status"] == "planned")
+    resp = client.post(
+        f"/activity/{activity['id']}/postpone",
+        json={"scheduled_at": other["scheduled_at"]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+
 # ---- W 组：周统计 ----
 
 

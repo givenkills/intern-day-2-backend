@@ -70,6 +70,30 @@ def test_confirm_rejects_quiet_hours_tamper(client, auth_headers):
     assert resp.status_code == 422
 
 
+def test_confirm_rejects_time_conflict_with_existing(client, auth_headers):
+    """confirm 落库时与已有 planned 时间冲突应被 422 拒绝。"""
+    _save_default_settings(client, auth_headers)
+    # 先系统生成一批，拿到一条已有活动的时间
+    generated = client.post("/activity/generate", headers=auth_headers).json()
+    existing_time = generated["activities"][0]["scheduled_at"]
+
+    resp = client.post(
+        "/activity/agent/confirm",
+        json={
+            "slots": [
+                {
+                    "scheduled_at": existing_time,
+                    "activity_type": "walk",
+                    "title": "站起来走动",
+                }
+            ]
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+    assert "冲突" in resp.json()["detail"]
+
+
 def test_confirm_rejects_time_inside_quiet_only(client, auth_headers):
     # 在下午窗口内加一段免打扰 15:00-16:00，伪造 15:30 应被免打扰拦截
     settings = dict(BASE_SETTINGS)

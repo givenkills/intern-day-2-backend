@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Query
 
 from ..deps import CurrentUser, DbConn
 from . import service
@@ -14,6 +16,7 @@ from .schemas import (
     AgentConfirmOut,
     AgentSuggestOut,
     GenerateOut,
+    PostponeIn,
     SkipIn,
     TodayOut,
     WeekOut,
@@ -53,8 +56,14 @@ def skip(activity_id: int, payload: SkipIn, current_user: CurrentUser, conn: DbC
 
 
 @router.post("/{activity_id}/postpone", summary="推迟活动")
-def postpone(activity_id: int, current_user: CurrentUser, conn: DbConn) -> dict:
-    return service.postpone_activity(conn, activity_id, current_user["id"])
+def postpone(
+    activity_id: int,
+    current_user: CurrentUser,
+    conn: DbConn,
+    payload: Annotated[PostponeIn | None, Body()] = None,
+) -> dict:
+    scheduled_at = payload.scheduled_at if payload else None
+    return service.postpone_activity(conn, activity_id, current_user["id"], scheduled_at)
 
 
 @router.get("/week", response_model=WeekOut, summary="本周统计")
