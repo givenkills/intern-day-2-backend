@@ -9,6 +9,28 @@
 
 ---
 
+## 第五天新增：久坐活动助手
+
+在登录、待办、Agent 的基础上，新增「久坐活动助手」：设置工作/可活动/免打扰时段，生成当天活动安排，对每条活动执行完成/推迟/跳过，查看周统计；Agent 参与安排建议（工具算槽 + 用户确认保存）。
+
+| 项 | 值 |
+| --- | --- |
+| 功能分支 | `feat/day-5-activity-assistant` |
+| 数据表 | `activity_settings` / `quiet_periods` / `activities` / `activity_events` |
+| 接口 | `/activity/*`，共 10 个，详见 [`docs/api-day-5.md`](docs/api-day-5.md) |
+| Agent | 3 个只读工具（settings / activities / preview_schedule）+ `suggest` / `confirm` 接口，详见 [`docs/day-5-agent.md`](docs/day-5-agent.md) |
+| 测试 | `uv run pytest` → 74 passed（原 33 + 活动 41） |
+
+核心设计：
+
+- **排期算法**：累积位置法，把有效时段（可活动窗口 ∩ 工作时段 − 免打扰 − 已占用）首尾相接成虚拟时间轴，均匀取点，天然跨过午休/会议空洞。
+- **推迟建模**：原记录置 `postponed`，派生新 `planned`（`postponed_from_id` 指向原记录），历史可回溯，周统计「推迟次数」才数得准。
+- **Agent 不越权**：工具只读、时间由后端算，`confirm` 接口对每个时间逐条二次校验（工作时段/窗口/免打扰），建议落在免打扰时段会被 422 拒。
+
+启动方式不变（见第 6 节）；Agent 相关环境变量沿用 `QWEN_API_KEY` 等，不配密钥时 `/agent` 不注册、活动功能照常可用。
+
+---
+
 ## 第四天新增：Agent 评测与优化
 
 在第三天的 Agent 上建立了可重复的评测基线，按基线失败项做了两处优化，并用同一组用例复测。
