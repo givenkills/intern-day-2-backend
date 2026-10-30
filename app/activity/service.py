@@ -515,7 +515,7 @@ def suggest_slots(conn: sqlite3.Connection, user_id: int, daily_target: int, fro
     slots = []
     for i, slot in enumerate(result.slots):
         kind = kind_cycle(i)
-        scheduled = local_date_to_utc_iso(local_today(), slot.start)
+        scheduled = utc_to_local_iso(local_date_to_utc_iso(local_today(), slot.start))
         slots.append(
             {
                 "scheduled_at": scheduled,
