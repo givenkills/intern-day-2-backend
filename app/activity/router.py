@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from ..deps import CurrentUser, DbConn
 from . import service
@@ -10,6 +10,9 @@ from .schemas import (
     ActivityOut,
     ActivitySettingsIn,
     ActivitySettingsOut,
+    AgentConfirmIn,
+    AgentConfirmOut,
+    AgentSuggestOut,
     GenerateOut,
     SkipIn,
     TodayOut,
@@ -57,3 +60,22 @@ def postpone(activity_id: int, current_user: CurrentUser, conn: DbConn) -> dict:
 @router.get("/week", response_model=WeekOut, summary="本周统计")
 def week(current_user: CurrentUser, conn: DbConn) -> dict:
     return service.week_stats(conn, current_user["id"])
+
+
+@router.post("/agent/suggest", response_model=AgentSuggestOut, summary="生成安排建议（不落库）")
+def agent_suggest(
+    current_user: CurrentUser,
+    conn: DbConn,
+    daily_target: int = Query(default=3, ge=1, le=8),
+    from_time: str | None = Query(default=None, pattern=r"^([01]\d|2[0-3]):([0-5]\d)$"),
+) -> dict:
+    return service.suggest_slots(conn, current_user["id"], daily_target, from_time)
+
+
+@router.post("/agent/confirm", response_model=AgentConfirmOut, summary="确认并保存 Agent 建议")
+def agent_confirm(
+    payload: AgentConfirmIn,
+    current_user: CurrentUser,
+    conn: DbConn,
+) -> dict:
+    return service.confirm_slots(conn, current_user["id"], [s.model_dump() for s in payload.slots])

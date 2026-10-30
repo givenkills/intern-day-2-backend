@@ -179,12 +179,23 @@ class SuggestSlot(BaseModel):
 
 
 class AgentSuggestOut(BaseModel):
-    suggestion_id: str
     requested: int
+    planned: int
     slots: list[SuggestSlot]
     notice: str | None = None
 
 
 class AgentConfirmIn(BaseModel):
-    suggestion_id: str
     slots: list[SuggestSlot]
+
+    @field_validator("slots")
+    @classmethod
+    def _non_empty(cls, value: list[SuggestSlot]) -> list[SuggestSlot]:
+        if not value:
+            raise ValueError("至少要提供一条安排")
+        return value
+
+
+class AgentConfirmOut(BaseModel):
+    planned: int
+    activities: list[ActivityOut]

@@ -13,9 +13,11 @@ from datetime import timedelta
 from fastapi import HTTPException, status
 
 from ..security import to_iso, utcnow
+from . import kinds
 from .kinds import kind_cycle
 from .scheduler import MIN_GAP, Slot, next_slot, plan_slots
 from .timeutil import (
+    format_time,
     local_date_to_utc_iso,
     local_today,
     minutes_of_local_iso,
@@ -47,6 +49,13 @@ class SettingsView:
     reminders_enabled: bool
     windows: list[Slot]
     quiet: list[Slot]
+
+
+def get_agent_user_id() -> int:
+    """Agent 工具里取当前登录用户 id（身份来自鉴权写入的 ContextVar）。"""
+    from ..agent.context import get_agent_user
+
+    return get_agent_user()["id"]
 
 
 def _activity_out(row: sqlite3.Row) -> dict:
@@ -477,3 +486,112 @@ def week_stats(conn: sqlite3.Connection, user_id: int) -> dict:
         "skipped": skipped,
         "days": [day_map[d.isoformat()] for d in days],
     }
+
+
+# ---- Agent 建议与确认 ----
+
+
+def suggest_slots(conn: sqlite3.Connection, user_id: int, daily_target: int, from_time: str | None) -> dict:
+    """生成候选时间槽（只读，不落库）。from_time 为 HH:MM，可选。"""
+    view = _settings_view(conn, user_id)
+    occupied = _occupied_of(conn, user_id, local_today().isoformat())
+
+    windows = view.windows
+    if from_time:
+        after = parse_time(from_time)
+        windows = [Slot(max(w.start, after), w.end) for w in windows if w.end > after]
+
+    result = plan_slots(
+        view.work_start,
+        view.work_end,
+        windows,
+        view.quiet,
+        occupied,
+        min(8, max(1, daily_target)),
+        5,
+        MIN_GAP,
+    )
+
+    slots = []
+    for i, slot in enumerate(result.slots):
+        kind = kind_cycle(i)
+        scheduled = local_date_to_utc_iso(local_today(), slot.start)
+        slots.append(
+            {
+                "scheduled_at": scheduled,
+                "activity_type": kind.type,
+                "title": kind.title,
+            }
+        )
+
+    return {
+        "requested": result.requested,
+        "planned": result.planned,
+        "slots": slots,
+        "notice": result.notice,
+    }
+
+
+def confirm_slots(conn: sqlite3.Connection, user_id: int, slots: list[dict]) -> dict:
+    """用户确认后保存 Agent 建议。每个时间都重新校验一遍，防前端/模型篡改。"""
+    if not slots:
+        raise HTTPException(status_code=422, detail="没有可保存的安排")
+
+    view = _settings_view(conn, user_id)
+    day = local_today()
+    now = to_iso(utcnow())
+
+    created: list[dict] = []
+    for slot in slots:
+        scheduled_utc = slot["scheduled_at"]
+        minutes = minutes_of_local_iso(scheduled_utc)
+
+        # 校验：必须落在工作时段内
+        if not (view.work_start <= minutes < view.work_end):
+            raise HTTPException(
+                status_code=422,
+                detail=f"计划时间 {format_time(minutes)} 不在工作时段内",
+            )
+        # 校验：必须落在某个可活动窗口内
+        in_window = any(w.start <= minutes < w.end for w in view.windows)
+        if not in_window:
+            raise HTTPException(
+                status_code=422,
+                detail=f"计划时间 {format_time(minutes)} 不在可活动时段内",
+            )
+        # 校验：不得落在免打扰时段内
+        for q in view.quiet:
+            if q.start <= minutes < q.end:
+                quiet_range = f"{format_time(q.start)}-{format_time(q.end)}"
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"计划时间 {format_time(minutes)} 与免打扰时段（{quiet_range}）冲突",
+                )
+
+        activity_type = slot.get("activity_type", "walk")
+        if not kinds.is_valid_type(activity_type):
+            raise HTTPException(status_code=422, detail=f"无效的活动类型：{activity_type}")
+        kind = kinds.kind_of(activity_type)
+
+        cursor = conn.execute(
+            """
+            INSERT INTO activities (
+                user_id, activity_type, title, description, plan_date, scheduled_at,
+                duration_minutes, status, source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 5, 'planned', 'agent', ?, ?)
+            """,
+            (
+                user_id, kind.type, kind.title, kind.description, day.isoformat(),
+                scheduled_utc, now, now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO activity_events (activity_id, user_id, action, from_status, to_status, created_at) "
+            "VALUES (?, ?, 'create', NULL, 'planned', ?)",
+            (cursor.lastrowid, user_id, now),
+        )
+        row = conn.execute("SELECT * FROM activities WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        created.append(_activity_out(row))
+
+    conn.commit()
+    return {"planned": len(created), "activities": created}
