@@ -30,6 +30,8 @@ _STATUS_FILTERS = {
         "查询当前登录用户自己的待办清单，只读。"
         "当用户问到自己有哪些待办、还剩几件没做完、最近加了什么时调用。"
         "返回 JSON，包含每条待办的内容、完成状态和创建时间，以及汇总数量。"
+        "参数 status 只能取 all（全部）、open（未完成）、done（已完成）三者之一；"
+        "给出其他值会被拒绝，需要按返回的 allowed 重新选择。"
     ),
 )
 async def list_my_todos(
@@ -39,7 +41,21 @@ async def list_my_todos(
     # 身份来自本次请求的登录校验，不接受模型或浏览器传入的用户标识。
     user = get_agent_user()
 
-    normalized = status if status in _STATUS_FILTERS else "all"
+    # 非法筛选值显式报错，不做静默兜底。
+    # 早先这里的写法是 status 不在枚举里就当成 all：用户问「未完成的有哪些」，
+    # 模型若传了一个不存在的筛选值，工具会返回全部待办，模型却按「未完成」的
+    # 口吻叙述，答案错了也没有任何痕迹。现在把错误交回给模型，让它自己改参数。
+    if status not in _STATUS_FILTERS:
+        return json.dumps(
+            {
+                "error": "invalid_status",
+                "received": status,
+                "allowed": list(_STATUS_FILTERS),
+                "hint": "status 只能是 all / open / done，请用合法值重新调用",
+            },
+            ensure_ascii=False,
+        )
+
     safe_limit = max(1, min(int(limit or 10), get_settings().agent_tool_todo_limit))
 
     with connection() as conn:
@@ -47,7 +63,7 @@ async def list_my_todos(
             f"""
             SELECT title, done, created_at
             FROM todos
-            WHERE user_id = ? {_STATUS_FILTERS[normalized]}
+            WHERE user_id = ? {_STATUS_FILTERS[status]}
             ORDER BY done ASC, id DESC
             LIMIT ?
             """,
@@ -67,7 +83,8 @@ async def list_my_todos(
 
     payload = {
         "owner": user["display_name"],
-        "filter": normalized,
+        "filter": status,
+        "limit": safe_limit,
         "total": summary["total"],
         "open": summary["open"],
         "returned": len(rows),
