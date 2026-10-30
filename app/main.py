@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .activity.router import router as activity_router
 from .agent.endpoint import register_agent_endpoint
 from .config import get_settings
 from .db import init_db
@@ -47,7 +48,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
@@ -84,6 +85,7 @@ def health() -> HealthOut:
 
 app.include_router(auth.router)
 app.include_router(todos.router)
+app.include_router(activity_router)
 
 # Agent 走 AG-UI 协议，接口是 POST /agent（SSE 事件流）。
 # 没配模型密钥时不注册：其余功能照常可用，也不会带着空密钥去调用模型服务。
