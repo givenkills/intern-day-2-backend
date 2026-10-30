@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 120
     # 允许跨域的前端来源，多个用英文逗号分隔。
     cors_origins: str = "http://localhost:5173"
+    # 额外允许的来源正则：覆盖安卓模拟器（10.0.2.2）与局域网真机调试（192.168/10/172.16-31）。
+    # 仅用于开发联调，正式环境应置空并把 cors_origins 收紧到具体域名。
+    cors_origin_regex: str = (
+        r"^http://(localhost|127\.0\.0\.1|10\.0\.2\.2"
+        r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?$"
+    )
 
     # 启动时若无任何用户则自动创建练习账号，方便别人克隆后直接登录。
     seed_on_startup: bool = True
