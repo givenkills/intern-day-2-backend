@@ -15,7 +15,7 @@ from fastapi import HTTPException, status
 from ..security import to_iso, utcnow
 from . import kinds
 from .kinds import kind_cycle
-from .scheduler import MIN_GAP, Slot, next_slot, plan_slots
+from .scheduler import MIN_GAP, Slot, available_slots, next_slot, plan_slots
 from .timeutil import (
     format_time,
     local_date_to_utc_iso,
@@ -362,6 +362,50 @@ def skip_activity(conn: sqlite3.Connection, activity_id: int, user_id: int, reas
     )
     conn.commit()
     return _activity_out(_load_activity(conn, activity_id, user_id))
+
+
+def postpone_options(conn: sqlite3.Connection, activity_id: int, user_id: int) -> dict:
+    """返回当天剩余可推迟的候选时间点（30 分钟粒度，避开免打扰与已占用）。
+
+    前端把这些时间点渲染成可点击按钮，代替难以操作的 select/time 控件。
+    时间点从「原活动时间 + min_gap」之后开始，直到工作时段结束。
+    """
+    row = _load_activity(conn, activity_id, user_id)
+    view = _settings_view(conn, user_id)
+    occupied = _occupied_of(conn, user_id, row["plan_date"])
+
+    # 原活动自身也算占用，避免候选点撞到原时间
+    own_start = minutes_of_local_iso(row["scheduled_at"])
+    occupied = occupied + [Slot(own_start, own_start + row["duration_minutes"])]
+
+    free = available_slots(
+        view.work_start,
+        view.work_end,
+        view.windows,
+        view.quiet,
+        occupied,
+        row["duration_minutes"],
+        MIN_GAP,
+    )
+
+    # 只保留原活动时间之后的候选点，按 30 分钟粒度采样
+    after = own_start + MIN_GAP
+    points: list[str] = []
+    for slot in free:
+        cursor = max(slot.start + MIN_GAP, after)
+        while cursor + row["duration_minutes"] + MIN_GAP <= slot.end:
+            points.append(format_time(cursor))
+            cursor += 30
+
+    # 去重 + 保序
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in points:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+
+    return {"plan_date": row["plan_date"], "times": unique}
 
 
 def postpone_activity(

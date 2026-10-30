@@ -55,6 +55,11 @@ def skip(activity_id: int, payload: SkipIn, current_user: CurrentUser, conn: DbC
     return service.skip_activity(conn, activity_id, current_user["id"], payload.reason)
 
 
+@router.get("/{activity_id}/postpone-options", summary="可推迟的候选时间点")
+def postpone_options(activity_id: int, current_user: CurrentUser, conn: DbConn) -> dict:
+    return service.postpone_options(conn, activity_id, current_user["id"])
+
+
 @router.post("/{activity_id}/postpone", summary="推迟活动")
 def postpone(
     activity_id: int,

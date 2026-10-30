@@ -297,6 +297,26 @@ def test_postpone_to_conflicting_time_rejected(client, auth_headers):
     assert resp.status_code == 422
 
 
+def test_postpone_options_returns_available_times(client, auth_headers):
+    """postpone-options 返回当天剩余可推迟的时间点，且不含免打扰时段。"""
+    activity = _generate_one(client, auth_headers)
+    resp = client.get(f"/activity/{activity['id']}/postpone-options", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    times = data["times"]
+    assert times, "应至少有一个候选时间点"
+    # 候选点都在原活动时间之后
+    from app.activity.timeutil import utc_to_local_iso
+
+    original_local = utc_to_local_iso(activity["scheduled_at"])
+    original_minutes = int(original_local[11:13]) * 60 + int(original_local[14:16])
+    for t in times:
+        hh, mm = int(t[:2]), int(t[3:5])
+        assert hh * 60 + mm > original_minutes, f"{t} 应在原时间之后"
+        # 不在午休 12:00-14:00 内
+        assert not (12 * 60 <= hh * 60 + mm < 14 * 60), f"{t} 不应落在午休时段"
+
+
 # ---- W 组：周统计 ----
 
 
