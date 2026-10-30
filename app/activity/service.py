@@ -1,0 +1,479 @@
+"""活动助手的业务服务层：设置读写、活动查询、生成、状态流转、周统计。
+
+所有函数都接收 sqlite3.Connection 与 user_id，数据库写操作在此收口，
+Agent 工具和路由都调这里，避免校验逻辑散落两处。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from datetime import timedelta
+
+from fastapi import HTTPException, status
+
+from ..security import to_iso, utcnow
+from .kinds import kind_cycle
+from .scheduler import MIN_GAP, Slot, next_slot, plan_slots
+from .timeutil import (
+    local_date_to_utc_iso,
+    local_today,
+    minutes_of_local_iso,
+    parse_time,
+    utc_to_local_iso,
+    week_start,
+)
+
+DEFAULT_SETTINGS = {
+    "work_start": "09:00",
+    "work_end": "18:00",
+    "morning_start": "10:00",
+    "morning_end": "12:00",
+    "afternoon_start": "14:00",
+    "afternoon_end": "17:30",
+    "daily_target": 3,
+    "reminders_enabled": 1,
+    "allow_in_worktime": 1,
+    "postpone_policy": "next_slot",
+    "timezone": "Asia/Shanghai",
+}
+
+
+@dataclass
+class SettingsView:
+    work_start: int
+    work_end: int
+    daily_target: int
+    reminders_enabled: bool
+    windows: list[Slot]
+    quiet: list[Slot]
+
+
+def _activity_out(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "activity_type": row["activity_type"],
+        "title": row["title"],
+        "description": row["description"],
+        "plan_date": row["plan_date"],
+        "scheduled_at": utc_to_local_iso(row["scheduled_at"]),
+        "duration_minutes": row["duration_minutes"],
+        "status": row["status"],
+        "source": row["source"],
+        "postponed_from_id": row["postponed_from_id"],
+        "skipped_reason": row["skipped_reason"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def _load_activity(conn: sqlite3.Connection, activity_id: int, user_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM activities WHERE id = ? AND user_id = ?",
+        (activity_id, user_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="活动不存在")
+    return row
+
+
+# ---- 设置 ----
+
+
+def get_settings(conn: sqlite3.Connection, user_id: int) -> dict:
+    row = conn.execute(
+        "SELECT * FROM activity_settings WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    quiet_rows = conn.execute(
+        "SELECT id, start_time, end_time, label, enabled FROM quiet_periods "
+        "WHERE user_id = ? ORDER BY id",
+        (user_id,),
+    ).fetchall()
+
+    if row is None:
+        base = dict(DEFAULT_SETTINGS)
+        base["quiet_periods"] = []
+        return base
+
+    return {
+        "work_start": row["work_start"],
+        "work_end": row["work_end"],
+        "morning_start": row["morning_start"],
+        "morning_end": row["morning_end"],
+        "afternoon_start": row["afternoon_start"],
+        "afternoon_end": row["afternoon_end"],
+        "daily_target": row["daily_target"],
+        "reminders_enabled": bool(row["reminders_enabled"]),
+        "allow_in_worktime": bool(row["allow_in_worktime"]),
+        "postpone_policy": row["postpone_policy"],
+        "timezone": row["timezone"],
+        "quiet_periods": [
+            {
+                "id": q["id"],
+                "start_time": q["start_time"],
+                "end_time": q["end_time"],
+                "label": q["label"],
+                "enabled": bool(q["enabled"]),
+            }
+            for q in quiet_rows
+        ],
+    }
+
+
+def _windows_of(settings: dict) -> list[Slot]:
+    windows: list[Slot] = []
+    if settings.get("morning_start") and settings.get("morning_end"):
+        windows.append(Slot(parse_time(settings["morning_start"]), parse_time(settings["morning_end"])))
+    if settings.get("afternoon_start") and settings.get("afternoon_end"):
+        windows.append(
+            Slot(parse_time(settings["afternoon_start"]), parse_time(settings["afternoon_end"]))
+        )
+    return windows
+
+
+def _quiet_of(conn: sqlite3.Connection, user_id: int) -> list[Slot]:
+    rows = conn.execute(
+        "SELECT start_time, end_time FROM quiet_periods WHERE user_id = ? AND enabled = 1",
+        (user_id,),
+    ).fetchall()
+    return [Slot(parse_time(r["start_time"]), parse_time(r["end_time"])) for r in rows]
+
+
+def _settings_view(conn: sqlite3.Connection, user_id: int) -> SettingsView:
+    settings = get_settings(conn, user_id)
+    return SettingsView(
+        work_start=parse_time(settings["work_start"]),
+        work_end=parse_time(settings["work_end"]),
+        daily_target=settings["daily_target"],
+        reminders_enabled=settings["reminders_enabled"],
+        windows=_windows_of(settings),
+        quiet=_quiet_of(conn, user_id),
+    )
+
+
+def _occupied_of(conn: sqlite3.Connection, user_id: int, plan_date: str) -> list[Slot]:
+    rows = conn.execute(
+        "SELECT scheduled_at, duration_minutes FROM activities "
+        "WHERE user_id = ? AND plan_date = ? AND status = 'planned'",
+        (user_id, plan_date),
+    ).fetchall()
+    occupied: list[Slot] = []
+    for r in rows:
+        start = minutes_of_local_iso(r["scheduled_at"])
+        occupied.append(Slot(start, start + r["duration_minutes"]))
+    return occupied
+
+
+def save_settings(conn: sqlite3.Connection, user_id: int, payload: dict) -> dict:
+    """保存设置与免打扰。校验工作时段倒挂已在 schema 层做；这里校验窗口越界。"""
+    work_start = parse_time(payload["work_start"])
+    work_end = parse_time(payload["work_end"])
+
+    # 窗口必须落在工作时段内（可为空）
+    for start_key, end_key in (("morning_start", "morning_end"), ("afternoon_start", "afternoon_end")):
+        start = payload.get(start_key)
+        end = payload.get(end_key)
+        if start and end:
+            if parse_time(end) <= parse_time(start):
+                raise HTTPException(status_code=422, detail="可活动时段的结束时间必须晚于开始时间")
+            if parse_time(start) < work_start or parse_time(end) > work_end:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"可活动时段（{start}-{end}）超出工作时段（{payload['work_start']}-{payload['work_end']}）",
+                )
+        elif bool(start) != bool(end):
+            raise HTTPException(status_code=422, detail="可活动时段必须同时提供开始和结束时间")
+
+    now = to_iso(utcnow())
+    conn.execute(
+        """
+        INSERT INTO activity_settings (
+            user_id, work_start, work_end, morning_start, morning_end,
+            afternoon_start, afternoon_end, daily_target, reminders_enabled,
+            allow_in_worktime, postpone_policy, timezone, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            work_start=excluded.work_start, work_end=excluded.work_end,
+            morning_start=excluded.morning_start, morning_end=excluded.morning_end,
+            afternoon_start=excluded.afternoon_start, afternoon_end=excluded.afternoon_end,
+            daily_target=excluded.daily_target, reminders_enabled=excluded.reminders_enabled,
+            allow_in_worktime=excluded.allow_in_worktime,
+            postpone_policy=excluded.postpone_policy, timezone=excluded.timezone,
+            updated_at=excluded.updated_at
+        """,
+        (
+            user_id, payload["work_start"], payload["work_end"],
+            payload.get("morning_start"), payload.get("morning_end"),
+            payload.get("afternoon_start"), payload.get("afternoon_end"),
+            payload["daily_target"], int(payload["reminders_enabled"]),
+            int(payload["allow_in_worktime"]), payload["postpone_policy"],
+            "Asia/Shanghai", now,
+        ),
+    )
+
+    # 免打扰整表替换：先删后插，保持简单（单用户练习场景）
+    conn.execute("DELETE FROM quiet_periods WHERE user_id = ?", (user_id,))
+    for q in payload.get("quiet_periods", []):
+        conn.execute(
+            "INSERT INTO quiet_periods (user_id, start_time, end_time, label, enabled) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, q["start_time"], q["end_time"], q.get("label"), int(q["enabled"])),
+        )
+    conn.commit()
+    return get_settings(conn, user_id)
+
+
+# ---- 今日活动 ----
+
+
+def list_today(conn: sqlite3.Connection, user_id: int) -> dict:
+    day = local_today().isoformat()
+    rows = conn.execute(
+        "SELECT * FROM activities WHERE user_id = ? AND plan_date = ? ORDER BY scheduled_at",
+        (user_id, day),
+    ).fetchall()
+    summary = _summary_of(rows)
+    return {"date": day, "summary": summary, "activities": [_activity_out(r) for r in rows]}
+
+
+def _summary_of(rows: list[sqlite3.Row]) -> dict:
+    summary = {"total": 0, "planned": 0, "completed": 0, "postponed": 0, "skipped": 0}
+    for r in rows:
+        summary["total"] += 1
+        summary[r["status"]] += 1
+    return summary
+
+
+def generate_today(conn: sqlite3.Connection, user_id: int) -> dict:
+    """生成当天安排。幂等：当天已有 planned/completed 记录时直接返回，不重复生成。"""
+    day = local_today().isoformat()
+    existing = conn.execute(
+        "SELECT * FROM activities WHERE user_id = ? AND plan_date = ? "
+        "AND status IN ('planned', 'completed', 'postponed')",
+        (user_id, day),
+    ).fetchall()
+    if existing:
+        return {
+            "requested": len(existing),
+            "planned": len([r for r in existing if r["status"] == "planned"]),
+            "notice": "当天已生成过安排，直接返回现有结果",
+            "activities": [_activity_out(r) for r in existing],
+        }
+
+    view = _settings_view(conn, user_id)
+    result = plan_slots(
+        view.work_start,
+        view.work_end,
+        view.windows,
+        view.quiet,
+        [],
+        view.daily_target,
+        5,
+        MIN_GAP,
+    )
+
+    now = to_iso(utcnow())
+    created: list[dict] = []
+    for i, slot in enumerate(result.slots):
+        kind = kind_cycle(i)
+        scheduled = local_date_to_utc_iso(local_today(), slot.start)
+        cursor = conn.execute(
+            """
+            INSERT INTO activities (
+                user_id, activity_type, title, description, plan_date,
+                scheduled_at, duration_minutes, status, source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 5, 'planned', 'system', ?, ?)
+            """,
+            (user_id, kind.type, kind.title, kind.description, day, scheduled, now, now),
+        )
+        conn.execute(
+            "INSERT INTO activity_events (activity_id, user_id, action, from_status, to_status, created_at) "
+            "VALUES (?, ?, 'generate', NULL, 'planned', ?)",
+            (cursor.lastrowid, user_id, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM activities WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        created.append(_activity_out(row))
+
+    conn.commit()
+    return {
+        "requested": result.requested,
+        "planned": result.planned,
+        "notice": result.notice,
+        "activities": created,
+    }
+
+
+# ---- 状态流转 ----
+
+
+def complete_activity(conn: sqlite3.Connection, activity_id: int, user_id: int) -> dict:
+    now = to_iso(utcnow())
+    cursor = conn.execute(
+        "UPDATE activities SET status = 'completed', completed_at = ?, updated_at = ? "
+        "WHERE id = ? AND user_id = ? AND status = 'planned'",
+        (now, now, activity_id, user_id),
+    )
+    if cursor.rowcount == 0:
+        _raise_invalid_transition(conn, activity_id, user_id)
+    conn.execute(
+        "INSERT INTO activity_events (activity_id, user_id, action, from_status, to_status, created_at) "
+        "VALUES (?, ?, 'complete', 'planned', 'completed', ?)",
+        (activity_id, user_id, now),
+    )
+    conn.commit()
+    return _activity_out(_load_activity(conn, activity_id, user_id))
+
+
+def skip_activity(conn: sqlite3.Connection, activity_id: int, user_id: int, reason: str | None) -> dict:
+    now = to_iso(utcnow())
+    cursor = conn.execute(
+        "UPDATE activities SET status = 'skipped', skipped_reason = ?, updated_at = ? "
+        "WHERE id = ? AND user_id = ? AND status = 'planned'",
+        (reason, now, activity_id, user_id),
+    )
+    if cursor.rowcount == 0:
+        _raise_invalid_transition(conn, activity_id, user_id)
+    conn.execute(
+        "INSERT INTO activity_events "
+        "(activity_id, user_id, action, from_status, to_status, note, created_at) "
+        "VALUES (?, ?, 'skip', 'planned', 'skipped', ?, ?)",
+        (activity_id, user_id, reason, now),
+    )
+    conn.commit()
+    return _activity_out(_load_activity(conn, activity_id, user_id))
+
+
+def postpone_activity(conn: sqlite3.Connection, activity_id: int, user_id: int) -> dict:
+    """推迟：原记录置 postponed，派生一条新的 planned。
+
+    关键：先算槽，算到了才在同一个事务里改状态 + 插新记录；
+    找不到槽时原记录保持 planned 不变，返回 ok:false。
+    """
+    row = _load_activity(conn, activity_id, user_id)
+    if row["status"] != "planned":
+        _raise_invalid_transition(conn, activity_id, user_id)
+
+    view = _settings_view(conn, user_id)
+    occupied = _occupied_of(conn, user_id, row["plan_date"])
+    # 原记录在计算可用槽时也算作占用，避免新时间又撞到原时间
+    after = max(minutes_of_local_iso(row["scheduled_at"]) + MIN_GAP, minutes_of_local_iso(to_iso(utcnow())))
+    slot = next_slot(
+        view.work_start,
+        view.work_end,
+        view.windows,
+        view.quiet,
+        occupied,
+        after,
+        row["duration_minutes"],
+        MIN_GAP,
+    )
+
+    if slot is None:
+        return {
+            "ok": False,
+            "reason": "今日剩余时段不足，无法再推迟",
+            "activity": _activity_out(row),
+        }
+
+    now = to_iso(utcnow())
+    scheduled = local_date_to_utc_iso(local_today(), slot.start)
+    conn.execute(
+        "UPDATE activities SET status = 'postponed', updated_at = ? WHERE id = ? AND user_id = ?",
+        (now, activity_id, user_id),
+    )
+    cursor = conn.execute(
+        """
+        INSERT INTO activities (
+            user_id, activity_type, title, description, plan_date, scheduled_at,
+            duration_minutes, status, source, postponed_from_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)
+        """,
+        (
+            user_id, row["activity_type"], row["title"], row["description"],
+            row["plan_date"], scheduled, row["duration_minutes"], row["source"],
+            activity_id, now, now,
+        ),
+    )
+    new_id = cursor.lastrowid
+    conn.execute(
+        "INSERT INTO activity_events (activity_id, user_id, action, from_status, to_status, created_at) "
+        "VALUES (?, ?, 'postpone', 'planned', 'postponed', ?)",
+        (activity_id, user_id, now),
+    )
+    conn.execute(
+        "INSERT INTO activity_events (activity_id, user_id, action, from_status, to_status, created_at) "
+        "VALUES (?, ?, 'create', NULL, 'planned', ?)",
+        (new_id, user_id, now),
+    )
+    conn.commit()
+
+    new_row = _load_activity(conn, new_id, user_id)
+    return {"ok": True, "activity": _activity_out(new_row)}
+
+
+def _raise_invalid_transition(conn: sqlite3.Connection, activity_id: int, user_id: int) -> None:
+    row = _load_activity(conn, activity_id, user_id)
+    labels = {
+        "completed": "已完成",
+        "postponed": "已推迟",
+        "skipped": "已跳过",
+    }
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"该活动{labels.get(row['status'], row['status'])}，无法重复操作",
+    )
+
+
+# ---- 周统计 ----
+
+
+def week_stats(conn: sqlite3.Connection, user_id: int) -> dict:
+    today = local_today()
+    start = week_start(today)
+    days = [start + timedelta(days=i) for i in range(7)]
+    end = days[-1]
+
+    rows = conn.execute(
+        """
+        SELECT plan_date, status FROM activities
+        WHERE user_id = ? AND plan_date >= ? AND plan_date <= ?
+        """,
+        (user_id, start.isoformat(), end.isoformat()),
+    ).fetchall()
+
+    day_map = {
+        d.isoformat(): {
+            "date": d.isoformat(), "planned": 0,
+            "completed": 0, "postponed": 0, "skipped": 0,
+        }
+        for d in days
+    }
+    planned = completed = postponed = skipped = 0
+    for r in rows:
+        key = r["plan_date"]
+        if key not in day_map:
+            continue
+        if r["status"] == "postponed":
+            # 被推迟的原记录不计入计划数，只计一次推迟动作
+            day_map[key]["postponed"] += 1
+            postponed += 1
+        else:
+            day_map[key]["planned"] += 1
+            planned += 1
+            if r["status"] == "completed":
+                day_map[key]["completed"] += 1
+                completed += 1
+            elif r["status"] == "skipped":
+                day_map[key]["skipped"] += 1
+                skipped += 1
+
+    return {
+        "week_start": start.isoformat(),
+        "week_end": end.isoformat(),
+        "planned": planned,
+        "completed": completed,
+        "postponed": postponed,
+        "skipped": skipped,
+        "days": [day_map[d.isoformat()] for d in days],
+    }
