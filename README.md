@@ -170,12 +170,25 @@ docker compose exec backend python scripts/seed_demo_data.py --date $(date -d ye
 # 3) 只验证「Worker 连上 Redis 并能执行任务」（不碰模型）
 docker compose exec backend python scripts/check_worker.py
 
-# 4) 演示自动调度：把 cron 临时改成下一分钟
-DAILY_REPORT_CRON_MINUTE=$(date -d '+2 min' +%-M) docker compose up -d worker
+# 4) 演示自动调度：把 cron 临时改成「两分钟后」
+#    注意 hour 和 minute 都要改——只改分钟的话，小时还是 0，下一次触发要等到凌晨
+NEXT_H=$(date -d '+2 min' +%-H); NEXT_M=$(date -d '+2 min' +%-M)
+DAILY_REPORT_CRON_HOUR=$NEXT_H DAILY_REPORT_CRON_MINUTE=$NEXT_M docker compose up -d worker
 docker compose logs -f worker | grep -E "schedule_fired|job_enqueued|job_started|job_succeeded"
 
 # 5) 恢复默认（00:05）
 docker compose up -d worker
+```
+
+真实跑出来的日志长这样（时间戳是本地时间，说明时区配置生效）：
+
+```text
+15:08:00: cron:schedule_daily_reports()
+15:08:00: job_enqueued job_id=daily-report:1:2026-11-01 user=1 date=2026-11-01
+15:08:00: schedule_fired date=2026-11-01 users=1 enqueued=1 duplicates=0 failed=0
+15:08:01: daily-report:1:2026-11-01:generate_daily_report(1, '2026-11-01')
+15:08:01: job_started user=1 date=2026-11-01 attempt=1 planned=5 completed=3 skipped=1 uncompleted=1 postponed_ops=1
+15:08:01: job_succeeded user=1 date=2026-11-01 attempt=1 review_len=30
 ```
 
 **补跑指定日期**（服务停机时漏掉的那天，不会自动补，只能手动补）：
@@ -206,6 +219,7 @@ curl -X POST http://localhost:8000/reports/2026-11-01/generate -H "Authorization
 
 - **不自动补跑**：服务在 00:05 停着，那天的日报不会自己补，必须用上面的补跑命令。cron 不会「补齐所有遗漏日期」。
 - `_job_id` 去重只在 `keep_result`（24 小时）内有效，超过一天同 id 可以再次入队——真正的幂等靠数据库唯一约束，不靠 Redis。
+- 失败补跑会自动换一代 job_id（`...:r2`、`...:r3`）：旧任务的结果还在 Redis 里保留着，沿用原 id 会被 ARQ 当成「已存在」，补跑就静默失效了。这一点是在演示里踩出来的。
 - 单 Worker 实例，没有高可用；多实例时 cron 的 `unique=True` 可以避免同一时刻重复调度。
 - 模型输出做了数字白名单校验，但只覆盖阿拉伯数字；用中文数字写的「三项」不会被拦（提示词里已要求不要用）。
 - 第五天的活动助手分支还没合进 `main`，本分支是叠在它上面的，合并顺序需要先第五天再本分支。

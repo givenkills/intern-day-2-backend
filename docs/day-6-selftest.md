@@ -1,150 +1,186 @@
 # 第六天自测记录：每日活动总结
 
-> 记录时间：2026-11-02 ｜ 分支：`feat/daily-summary-queue` ｜ 环境：Windows 11 + Python 3.13 + uv 0.13.6
+> 记录时间：2026-11-02 ｜ 分支：`feat/daily-summary-queue` ｜ 环境：Windows 11 + Docker Desktop 29.9.2
 
-## 一、先说清楚验证边界
+## 一、验证环境说明
 
-本机 **Docker Hub 不可达**（`dial tcp registry-1.docker.io:443 ... no HTTPS proxy`），拉不到 `redis:7.2-alpine`，因此**与 Redis 队列相关的容器场景没有在本机跑过**。为了让业务链路仍然被真实验证，用了两个替代手段：
+| 项 | 值 |
+| --- | --- |
+| 容器 | `intern-day-2-backend:drcheck`（本项目镜像，同一镜像跑 api 与 worker） |
+| Redis | `redis:7.2-alpine`，容器内 `redis://drcheck-redis:6379/0`，不对外暴露端口 |
+| 数据库 | 命名卷 `drcheck-data` → `/data/app.db`，api 与 worker 共用 |
+| 模型 | **本地假模型服务**（OpenAI 兼容的 `/v1/chat/completions`），从 prompt 里读出统计数字并返回合规 JSON |
 
-| 手段 | 做法 | 覆盖了什么 |
-| --- | --- | --- |
-| 进程内调用任务函数 | 直接 `await generate_daily_report({"job_try": 1}, uid, date)` | 除「Redis 入队/领取」一跳之外的全部业务链路，都是真代码 |
-| 本地假模型服务 | 实现一个 OpenAI 兼容的 `/v1/chat/completions`，按收到的统计回一段合规 JSON | `agent_framework → HTTP → 解析 → 5 道校验 → 落库` 全走真实代码路径，只有「模型」是假的 |
-
-**下面第 3 节标注「未验证」的项，提交时一律按未验证算，不写成已通过。**
+关于模型：本机没有可用的千问密钥，所以用本地假服务替代。**除了「模型」这一步是假的，`agent_framework → HTTP → 解析 → 5 道校验 → 落库` 全部是真实代码路径**，请求在 worker 日志里可见（`POST .../chat/completions "HTTP/1.1 200 OK"`）。真实模型仍需在配好密钥的环境里补测。
 
 ## 二、自动化测试
 
 ```bash
 $ uv run pytest
-121 passed in 9.94s
+123 passed in 10.39s
 
 $ uv run ruff check app tests
 All checks passed!
 ```
 
-新增 43 个用例，按关注点分四组：
+新增 45 个用例：统计口径 9、幂等并发 9、接口 16、Agent 校验 11。
 
-| 文件 | 用例数 | 关注点 |
-| --- | --- | --- |
-| `tests/test_daily_report_stats.py` | 9 | 日期边界（左闭右开）、跨月跨年、推迟链只算一次、推迟次数按操作日、恒等式、零记录 |
-| `tests/test_daily_report_idempotency.py` | 9 | 唯一索引、抢占只能成功一次、成功不重算、失败可重试、租约过期可接管、4 线程并发抢占 |
-| `tests/test_daily_report_api.py` | 14 | 登录、日期校验、五种状态、跨用户隔离、队列不可用 503、失败不泄露堆栈 |
-| `tests/test_daily_report_agent_guard.py` | 11 | 编造数字、无记录却说久坐、医疗表述、JSON 结构、长度、代码块包裹 |
+## 三、容器内实测（八个场景）
 
-## 三、手工验证
+### 1. 自动执行 —— 不点按钮，cron 自己跑完（已验证）
 
-### 1. 统计口径正确（已验证）
-
-```bash
-$ python scripts/seed_demo_data.py --date 2026-11-01
-已为 intern 造好 2026-11-01 的演示数据：planned=5 completed=3 skipped=1 uncompleted=1 postponed_ops=1
-
-$ python -c "...build_stats(conn, uid, date(2026,11,1))..."
-口径统计: 5 3 1 1 1 | has_records = True
-恒等式: True
-```
-
-数据构成为 2 条完成、1 条跳过、1 条未完成、1 条「推迟后完成」。推迟链里的原记录是 `postponed`，不计入计划数，所以是 5 而不是 6；推迟次数按操作发生的自然日统计，所以是 1。
-
-### 2. Agent 生成 + 校验 + 落库（已验证，模型为本地假服务）
+`docker logs drcheck-worker` 原样摘录（时间戳为本地时间）：
 
 ```text
-job_started user=1 date=2026-11-01 attempt=1 planned=5 completed=3 skipped=1 uncompleted=1 postponed_ops=1
-job_succeeded user=1 date=2026-11-01 attempt=1 review_len=27
-任务返回: {'status': 'success', 'report_date': '2026-11-01', 'planned': 5, 'completed': 3, 'postponed_ops': 1}
-回顾: 当天 5 项安排完成 3 项，跳过 1 项，未完成 1 项。
-建议: 把未完成的 1 项挪到上午可活动时段，冲突更少。
+15:08:00: cron:schedule_daily_reports()
+15:08:00: job_enqueued job_id=daily-report:1:2026-11-01 user=1 date=2026-11-01
+15:08:00: schedule_fired date=2026-11-01 users=1 enqueued=1 duplicates=0 failed=0
+15:08:01: daily-report:1:2026-11-01:generate_daily_report(1, '2026-11-01')
+15:08:01: job_started user=1 date=2026-11-01 attempt=1 planned=5 completed=3 skipped=1 uncompleted=1 postponed_ops=1
+15:08:01: HTTP Request: POST http://192.168.0.12:8899/v1/chat/completions "HTTP/1.1 200 OK"
+15:08:01: job_succeeded user=1 date=2026-11-01 attempt=1 review_len=30
 ```
 
-### 3. 重复执行不产生第二份（已验证）
+启动那一行同时证明时区配置生效：`worker_ready ... timezone=Asia/Shanghai cron=15:08`（演示时把 hour 和 minute 都改成了当前时间）。
 
-```text
-第二次执行返回: {'status': 'skipped', 'reason': 'already_success'}
-库中行数 = 1，review 未被覆盖: True
-```
+### 2. 统计正确（已验证）
 
-### 4. 没有记录时如实说明（已验证）
+`GET /reports/2026-11-01`：
 
-```text
-任务返回: {'status': 'success', 'report_date': '2026-10-31', 'planned': 0, ...}
-回顾: 当天没有活动记录，无法判断实际执行情况，也未记录久坐时长。
-sedentary_minutes = None（不是 0）
-```
-
-### 5. 模型不可用时的失败与重试（已验证）
-
-```text
-$ QWEN_BASE_URL=http://127.0.0.1:9/v1   # 不可达端口
-返回值: {'status': 'failed', 'code': 'AGENT_UPSTREAM_ERROR', 'transient': True}
-库中状态: failed | error_code = AGENT_UPSTREAM_ERROR
-任务层: 抛出了 Retry（<Retry defer 30.00s>），符合预期
-```
-
-失败只落 `error_code`，接口返回的是「模型服务暂时不可用，总结未生成」，不含堆栈（见第 6 节）。
-
-### 6. HTTP 接口行为（已验证，真实 uvicorn + curl）
-
-```bash
-$ curl -s .../reports/2026-11-01 -H "Authorization: Bearer $TOKEN"
+```json
 {"report_date":"2026-11-01","status":"success",
  "stats":{"planned":5,"completed":3,"skipped":1,"uncompleted":1,"postponed_ops":1},
  "review":"当天 5 项安排完成 3 项，跳过 1 项，未完成 1 项。",
- "sedentary":{"recorded":false,"minutes":null},
- "generated_at":"2026-11-02T11:35:48+08:00","attempt":1,"error":null}
-
-$ curl -s .../reports/2026-10-30 -H "Authorization: Bearer $TOKEN"
-{"report_date":"2026-10-30","status":"not_generated","stats":null,...}
-
-$ curl -X POST .../reports/2026-10-30/generate -H "Authorization: Bearer $TOKEN"   # Redis 未启动
-HTTP 503
-{"detail":"任务队列暂不可用，总结未提交，请稍后重试"}
-
-$ curl -s .../reports/2026-10-30 ...    # 触发失败后再查，不能变成"生成中"
-not_generated
-
-$ curl -s .../reports/2026-11-02 ...    # 当天还没过完
-HTTP 422
-
-$ curl -s .../reports/2026-11-01         # 未带令牌
-HTTP 401
+ "generated_at":"2026-11-02T15:08:01+08:00"}
 ```
 
-### 7. 并发抢占（已验证）
+数据由 `scripts/seed_demo_data.py` 造：2 条完成、1 条跳过、1 条未完成、1 条「推迟后完成」。推迟链上的原记录是 `postponed`，不计入计划数，所以是 5 不是 6。
 
-4 个线程同时对同一 `(user_id, report_date)` 调 `claim`：1 个成功、3 个失败、0 个异常，库里仍只有 1 行。
+### 3. 没有记录时如实说明（已验证）
 
-> 这一条顺带修掉一个真问题：Windows 上多个线程**同时新建** SQLite 连接去打开 WAL 库，会偶发 `attempt to write a readonly database`。现在在建连接处加了一把锁（`app/db.py` 的 `_CONNECT_LOCK`），并把这个场景固定成用例。
+```json
+{"report_date":"2026-10-30","status":"success","stats":{"planned":0},
+ "review":"当天没有活动记录，无法判断实际执行情况，也未记录久坐时长。",
+ "sedentary":{"recorded":false,"minutes":null}}
+```
 
-## 四、未验证项（不要当成已通过）
+不是「久坐 0 分钟」，也不是「完成 0 项，继续保持」。
 
-| # | 场景 | 为什么没做 | 怎么补 |
-| --- | --- | --- | --- |
-| 1 | 容器内 `worker` 连上 Redis 并执行 `ping` | 本机拉不到 redis 镜像 | `docker compose up -d` 后跑 `scripts/check_worker.py` |
-| 2 | cron 到点自动触发（00:05，改分钟演示） | 同上 | 改 `DAILY_REPORT_CRON_MINUTE` 后看 `docker compose logs -f worker` |
-| 3 | Worker 停止 → 投递 → 启动 → 任务被处理 | 同上 | `docker compose stop worker` / `start` |
-| 4 | 处理中断后的重复执行保护（真实 kill 容器） | 同上 | 任务执行中 `docker compose restart worker`，观察库里仍只有一行 |
-| 5 | 真实模型（千问）生成 | 本机没有可用的 `QWEN_API_KEY` | 配好密钥后 `docker compose up -d`，看页面 |
-| 6 | 页面截图 | 截图工具在本机整窗 > 10 MiB（与上周同一问题），且无真实模型 | 配好密钥后浏览器实机截「成功 / 生成中 / 未生成 / 失败」四态 |
-| 7 | 重启 API 后日报仍可查 | 需要在容器里重启 | `docker compose restart backend` 后刷新页面 |
+### 4. 重复执行只有一份（已验证）
 
-## 五、复现命令
+同一日期再点一次生成：
+
+```json
+{"report_date":"2026-11-01","status":"already_generated","message":"该日总结已生成，直接复用已有结果"}
+```
+
+库里每个日期只有一行：
+
+```text
+[('2026-10-28','success',4,1), ('2026-10-30','success',1,1), ('2026-11-01','success',1,1)]
+```
+
+### 5. 失败与有限重试，修复后能补跑（已验证）
+
+把 worker 的 `QWEN_BASE_URL` 指向不可达端口：
+
+```text
+15:09:32: job_started ... attempt=1
+15:09:39: job_retry ... attempt=1 code=AGENT_UPSTREAM_ERROR defer=30s
+15:10:09: job_started ... attempt=2
+15:10:17: job_retry ... attempt=2 code=AGENT_UPSTREAM_ERROR defer=60s
+15:11:17: job_started ... attempt=3
+15:11:24: job_failed_final ... attempt=3 code=AGENT_UPSTREAM_ERROR
+```
+
+接口只回一句人话，不带堆栈：
+
+```json
+{"status":"failed","attempt":3,"error":{"code":"AGENT_UPSTREAM_ERROR","message":"模型服务暂时不可用，总结未生成"}}
+```
+
+换回可用模型后补跑：
+
+```json
+{"status":"queued","job_id":"daily-report:1:2026-10-28:r4"}
+```
+
+10 秒后 `status=success, attempt=4`。
+
+### 6. Worker 停机期间任务不丢（已验证）
 
 ```bash
+docker stop drcheck-worker
+# POST /reports/2026-10-30/generate → 202，库里 pending / attempt=0
+# Redis 里能看到排队中的任务：arq:job:daily-report:1:2026-10-30
+docker start drcheck-worker
+# 10 秒后 status=success，日志 job_started → job_succeeded
+```
+
+### 7. 持久化与跨用户隔离（已验证）
+
+- `docker restart drcheck-api` 后重新登录，`GET /reports/2026-11-01` 仍返回同一份 `success` 与相同统计。
+- 第二个账号（走真实注册流程）读同一天：`status=not_generated`，`review=null`。
+
+### 8. Redis 不可用时接口不撒谎（已验证）
+
+```bash
+docker stop drcheck-redis
+$ curl -X POST .../reports/2026-10-29/generate
+HTTP 503 {"detail":"任务队列暂不可用，总结未提交，请稍后重试"}
+$ curl .../reports/2026-10-29        # 不能被留成"生成中"
+status = not_generated
+```
+
+### 9. 连通性自检
+
+```bash
+$ docker exec drcheck-api python scripts/check_worker.py
+[通过] 已连接 Redis：redis://drcheck-redis:6379/0
+[通过] Worker 已执行测试任务：{'pong': True, 'at': '2026-11-02T07:04:04+00:00'}
+```
+
+## 四、真跑起来才发现的四个问题（都已修）
+
+| # | 现象 | 原因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | worker 日志里只有 ARQ 自己的行，`schedule_fired` / `job_succeeded` 一条都没有 | ARQ 的 `default_log_config` 只给 `arq` 这个 logger 装 handler，业务 logger 往 root 传播时没有 handler，INFO 全被丢掉 | `app/worker.py` 补一次 `logging.basicConfig`（已有 handler 时是空操作，不影响 uvicorn） |
+| 2 | `docker compose exec backend python scripts/seed_demo_data.py` 报文件不存在 | Dockerfile 只 `COPY app`，`scripts/` 没进镜像 | Dockerfile 增加 `COPY scripts ./scripts` |
+| 3 | 失败的日报补跑不了，接口回「该日任务已在队列中」 | ARQ 的 job key 保留 `keep_result`（24h），同 `job_id` 再入队返回 `None`，被误判成"排队中" | 补跑时换一代 `job_id`（`:r2`、`:r3`…），首投仍用稳定 id 去重 |
+| 4 | 按文档把 cron 改成「两分钟后」不触发 | `DAILY_REPORT_CRON_MINUTE` 只改分钟，hour 仍是 0，下一次得等到凌晨 | README 改成同时设置 `DAILY_REPORT_CRON_HOUR` |
+
+第 3 条最值得记：它不报错，只让用户以为「已经在排队了」，然后永远等不到结果。
+
+## 五、仍未验证
+
+| # | 场景 | 原因 | 怎么补 |
+| --- | --- | --- | --- |
+| 1 | 真实千问模型生成 | 本机没有可用的 `QWEN_API_KEY` | 配好密钥后 `docker compose up -d`，看页面与日志 |
+| 2 | 页面截图（成功 / 生成中 / 未生成 / 失败四态） | 截图工具整窗超过 10 MiB 上限（与第四天同一问题），且目前没有真实模型 | 配好密钥后浏览器实机截图 |
+| 3 | 多 Worker 实例下 cron 只触发一次 | 只有一台机器，没起第二个 worker | `docker compose up -d --scale worker=2` 后看 `schedule_fired` 是否只出现一次 |
+
+## 六、复现命令
+
+```bash
+docker compose up -d --build
+docker compose ps
+
+# 造昨天的数据
+docker compose exec backend python scripts/seed_demo_data.py --date $(date -d yesterday +%F)
+
+# Worker 连通性（不碰模型）
+docker compose exec backend python scripts/check_worker.py
+
+# 演示自动触发：hour 和 minute 都要改
+NEXT_H=$(date -d '+2 min' +%-H); NEXT_M=$(date -d '+2 min' +%-M)
+DAILY_REPORT_CRON_HOUR=$NEXT_H DAILY_REPORT_CRON_MINUTE=$NEXT_M docker compose up -d worker
+docker compose logs -f worker
+docker compose up -d worker     # 恢复 00:05
+
 # 自动化
 uv run pytest
 uv run ruff check app tests
-
-# 只有 Python、没有 Redis 时也能跑的业务链路验证
-uv run python scripts/seed_demo_data.py --date 2026-11-01
-uv run python -c "
-import asyncio
-from app.daily_report.tasks import generate_daily_report
-print(asyncio.run(generate_daily_report({'job_try': 1}, 1, '2026-11-01')))
-"
-
-# 有容器、有 Redis 时的完整验证
-docker compose up --build -d
-docker compose exec backend python scripts/check_worker.py
-docker compose logs -f worker
 ```
+
+> 本机验证用的是 `docker run` 起的等价三容器（api / worker / redis），因为已有容器占着 8000 端口；
+> 拓扑与环境变量与 `compose.yaml` 一致。`docker compose config` 语法已校验。
