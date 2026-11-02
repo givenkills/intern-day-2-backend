@@ -27,6 +27,19 @@ def client():
         yield test_client
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _prepare_database():
+    """不经过 TestClient 的用例（直接调 stats / store）也需要有库和练习账号。
+
+    TestClient 的 lifespan 会做同样的事，这里提前做一遍，两者都是幂等的。
+    """
+    from app.db import init_db
+    from app.seed import seed_demo_user
+
+    init_db()
+    seed_demo_user()
+
+
 @pytest.fixture
 def auth_headers(client):
     """每次调用都新建一条会话，避免退出登录的用例影响其他用例。"""

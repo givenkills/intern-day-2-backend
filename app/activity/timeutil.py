@@ -88,3 +88,17 @@ def plan_date_of_iso(iso_utc: str) -> str:
 def week_start(day: date) -> date:
     """返回 day 所在周的周一。"""
     return day - timedelta(days=day.weekday())
+
+
+def local_day_utc_bounds(day: date) -> tuple[str, str]:
+    """某本地自然日 [00:00, 次日 00:00) 对应的 UTC ISO 串，左闭右开。
+
+    返回的两个串直接用于和库里的 created_at 做字符串比较（格式统一，
+    字典序即时间序），这样 23:59:59 属于当天、次日 00:00:00 属于下一天。
+    """
+    start = datetime.combine(day, time.min, tzinfo=TZ)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(UTC).isoformat(timespec="seconds"),
+        end.astimezone(UTC).isoformat(timespec="seconds"),
+    )
