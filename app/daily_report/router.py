@@ -87,7 +87,10 @@ async def generate_daily_report(
             }
 
     try:
-        job_id, queued = await queue.enqueue_report(user_id, day)
+        # 失败过的日报换一个 job_id 再投：旧 job 的结果还在 Redis 里保留 24 小时，
+        # 沿用原 id 会被 ARQ 当成「已存在」，补跑就静默失效了。
+        generation = (row["attempt"] + 1) if row is not None and row["status"] == "failed" else 1
+        job_id, queued = await queue.enqueue_report(user_id, day, generation)
     except queue.QueueUnavailable:
         # 队列不可用必须如实报错，不能让前端以为已经排队
         raise HTTPException(

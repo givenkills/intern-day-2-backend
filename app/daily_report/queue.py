@@ -29,9 +29,15 @@ class QueueUnavailable(RuntimeError):
     """连不上 Redis，或入队失败。接口层据此返回 503。"""
 
 
-def job_id_for(user_id: int, day: date) -> str:
-    """稳定的任务标识：日志、数据库、接口返回都能用同一个字符串对上。"""
-    return f"daily-report:{user_id}:{day.isoformat()}"
+def job_id_for(user_id: int, day: date, generation: int = 1) -> str:
+    """稳定的任务标识：日志、数据库、接口返回都能用同一个字符串对上。
+
+    generation 只在「之前那次已经跑完（成功或失败）」时递增：
+    ARQ 的任务 key 会保留到 keep_result 过期，同一个 id 再入队会返回 None，
+    如果失败后还用原 id，补跑就永远排不进去——看起来像「已在队列中」，其实什么也没发生。
+    """
+    base = f"daily-report:{user_id}:{day.isoformat()}"
+    return base if generation <= 1 else f"{base}:r{generation}"
 
 
 async def get_pool() -> ArqRedis:
@@ -57,14 +63,14 @@ async def close_pool() -> None:
         _pool = None
 
 
-async def enqueue_report(user_id: int, day: date) -> tuple[str, bool]:
+async def enqueue_report(user_id: int, day: date, generation: int = 1) -> tuple[str, bool]:
     """投递一条日报任务。
 
     返回 (job_id, 是否新入队)。返回 False 表示 Redis 里已经有同 id 的任务
     还没跑完——这不是错误，调用方按「已在队列中」回给前端即可。
     """
     pool = await get_pool()
-    job_id = job_id_for(user_id, day)
+    job_id = job_id_for(user_id, day, generation)
     try:
         job = await pool.enqueue_job(
             "generate_daily_report",

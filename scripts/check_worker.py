@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -43,20 +44,23 @@ async def run(args) -> int:
         from datetime import date
 
         day = date.fromisoformat(report_date)
+        # 补跑用带时间戳的 job_id：同一天之前那次的结果可能还在 Redis 里保留着，
+        # 沿用原 id 会被 ARQ 当成「已存在」，任务根本没排进去。
+        job_id = f"{job_id_for(user_id, day)}:manual{int(time.time())}"
         job = await redis.enqueue_job(
-            "generate_daily_report", user_id, day.isoformat(), _job_id=job_id_for(user_id, day)
+            "generate_daily_report", user_id, day.isoformat(), _job_id=job_id
         )
-        target = f"{job.job_id if job else job_id_for(user_id, day)}（日报 {report_date}）"
         if job is None:
-            print("[提示] 同 id 任务已在队列中，直接等结果")
-        result = None
+            print(f"[失败] 入队被拒（job_id={job_id}）")
+            await redis.aclose()
+            return 3
+        print(f"[通过] 已入队 job_id={job_id}，等待 Worker 执行…")
         try:
-            from arq.jobs import Job
-
-            result = await Job(job_id_for(user_id, day), redis).result(timeout=args.timeout)
+            result = await job.result(timeout=args.timeout)
         except Exception as exc:  # noqa: BLE001
-            print(f"[失败] 等不到结果（{target}）：{exc}")
+            print(f"[失败] 等不到结果（{report_date}）：{exc}")
             print("       Worker 没起来、或任务执行超过 timeout")
+            await redis.aclose()
             return 3
         print(f"[通过] 任务已执行：{result}")
         await redis.aclose()

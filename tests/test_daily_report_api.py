@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import itertools
+from datetime import date
 
 from dr_helpers import day_before
 
@@ -116,7 +117,7 @@ def test_other_user_generate_does_not_touch_first_user(client, auth_headers, mon
     day = day_before(24)
     insert_success_row(user_id, day, review="A 的日报")
 
-    async def fake_enqueue(uid: int, when) -> tuple[str, bool]:
+    async def fake_enqueue(uid: int, when, generation: int = 1) -> tuple[str, bool]:
         return f"daily-report:{uid}:{when}", True
 
     monkeypatch.setattr(queue, "enqueue_report", fake_enqueue)
@@ -133,7 +134,7 @@ def test_generate_queues_and_returns_immediately(client, auth_headers, monkeypat
     day = day_before(25)
     calls: list[tuple[int, object]] = []
 
-    async def fake_enqueue(uid: int, when) -> tuple[str, bool]:
+    async def fake_enqueue(uid: int, when, generation: int = 1) -> tuple[str, bool]:
         calls.append((uid, when))
         return f"daily-report:{uid}:{when.isoformat()}", True
 
@@ -154,7 +155,7 @@ def test_generate_queues_and_returns_immediately(client, auth_headers, monkeypat
 def test_generate_reports_503_when_redis_is_down(client, auth_headers, monkeypatch):
     day = day_before(26)
 
-    async def broken_enqueue(uid: int, when) -> tuple[str, bool]:
+    async def broken_enqueue(uid: int, when, generation: int = 1) -> tuple[str, bool]:
         raise queue.QueueUnavailable("connection refused")
 
     monkeypatch.setattr(queue, "enqueue_report", broken_enqueue)
@@ -173,7 +174,7 @@ def test_generate_reuses_success_without_requeue(client, auth_headers, monkeypat
     day = day_before(27)
     insert_success_row(user_id, day, review="已有的日报")
 
-    async def should_not_be_called(uid: int, when) -> tuple[str, bool]:
+    async def should_not_be_called(uid: int, when, generation: int = 1) -> tuple[str, bool]:
         raise AssertionError("已有成功结果时不该再入队")
 
     monkeypatch.setattr(queue, "enqueue_report", should_not_be_called)
@@ -191,7 +192,7 @@ def test_generate_in_progress_when_another_worker_holds_lease(client, auth_heade
         store.ensure_pending(conn, user_id, day)
         assert store.claim(conn, user_id, day, 600)
 
-    async def should_not_be_called(uid: int, when) -> tuple[str, bool]:
+    async def should_not_be_called(uid: int, when, generation: int = 1) -> tuple[str, bool]:
         raise AssertionError("正在执行时不该再入队")
 
     monkeypatch.setattr(queue, "enqueue_report", should_not_be_called)
@@ -229,3 +230,37 @@ def test_generate_503_against_a_really_closed_redis(client, auth_headers, monkey
     response = client.post(f"/reports/{day.isoformat()}/generate", headers=auth_headers)
     assert response.status_code == 503
     assert "队列" in response.json()["detail"]
+
+
+def test_job_id_is_stable_until_a_retry_is_needed():
+    """同一个 job_id 才挡得住重复入队；失败补跑必须换一个，否则 ARQ 会当成已存在。"""
+    from app.daily_report.queue import job_id_for
+
+    day = date(2026, 11, 1)
+    assert job_id_for(1, day) == "daily-report:1:2026-11-01"
+    assert job_id_for(1, day, 1) == "daily-report:1:2026-11-01"
+    assert job_id_for(1, day, 2) == "daily-report:1:2026-11-01:r2"
+    assert job_id_for(1, day, 3) != job_id_for(1, day, 2)
+
+
+def test_failed_report_is_requeued_with_a_new_job_id(client, auth_headers, monkeypatch):
+    """失败的行再点一次，必须真的重新入队（而不是回一句「已在队列中」）。"""
+    user_id = intern_user_id(client, auth_headers)
+    day = day_before(31)
+    with connection() as conn:
+        store.ensure_pending(conn, user_id, day)
+        assert store.claim(conn, user_id, day, 600)
+        store.mark_failed(conn, user_id, day, "AGENT_UPSTREAM_ERROR", "boom")
+
+    seen: list[int] = []
+
+    async def fake_enqueue(uid: int, when, generation: int = 1) -> tuple[str, bool]:
+        seen.append(generation)
+        return f"daily-report:{uid}:{when}:r{generation}", True
+
+    monkeypatch.setattr(queue, "enqueue_report", fake_enqueue)
+
+    response = client.post(f"/reports/{day.isoformat()}/generate", headers=auth_headers)
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert seen == [2], "attempt=1 失败后应当用第 2 代 job_id 重新入队"
