@@ -55,6 +55,27 @@ class Settings(BaseSettings):
     # 只读工具一次最多返回多少条待办，避免把整库塞进上下文。
     agent_tool_todo_limit: int = 20
 
+    # ---- 每日总结：Redis 队列 + ARQ 后台任务 ----
+    # 队列地址。容器内必须用 Compose 服务名 redis，不能用 localhost（那是容器自己）。
+    redis_url: str = "redis://redis:6379/0"
+    # 日报归属的自然日时区。显式配置，不读容器 TZ，也不依赖宿主机时区。
+    daily_report_timezone: str = "Asia/Shanghai"
+    # 每天几点几分生成「前一天」的总结。ARQ cron 用这个时间 + 上面的时区。
+    daily_report_cron_hour: int = 0
+    daily_report_cron_minute: int = 5
+    # 单个任务的模型调用失败重试上限（不含首次执行）
+    daily_report_max_tries: int = 3
+    # 单次任务执行超时（秒）：要覆盖「模型超时 45s + 退避 + 写库」的最坏情况
+    daily_report_job_timeout: int = 180
+    # 单次模型调用超时（秒），超时按可重试错误处理
+    daily_report_agent_timeout: int = 45
+    # 任务租约（秒）：抢到 running 的 Worker 崩溃后，多久允许别人接管
+    daily_report_lease_seconds: int = 600
+    # Worker 同时执行的任务数。SQLite 单写者，开太大只会排队等锁
+    daily_report_max_jobs: int = 4
+    # 仅用于演示与补跑：强制指定目标日期（YYYY-MM-DD），留空表示「昨天」
+    daily_report_target_date: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
