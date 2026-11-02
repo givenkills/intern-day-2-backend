@@ -19,6 +19,8 @@ from fastapi.responses import JSONResponse
 from .activity.router import router as activity_router
 from .agent.endpoint import register_agent_endpoint
 from .config import get_settings
+from .daily_report.queue import close_pool
+from .daily_report.router import router as reports_router
 from .db import init_db
 from .routers import auth, todos
 from .schemas import HealthOut
@@ -35,6 +37,8 @@ async def lifespan(app: FastAPI):
     if settings.seed_on_startup:
         seed_demo_user()
     yield
+    # Redis 连接池是惰性创建的，没连过就不需要关
+    await close_pool()
 
 
 app = FastAPI(
@@ -86,6 +90,7 @@ def health() -> HealthOut:
 app.include_router(auth.router)
 app.include_router(todos.router)
 app.include_router(activity_router)
+app.include_router(reports_router)
 
 # Agent 走 AG-UI 协议，接口是 POST /agent（SSE 事件流）。
 # 没配模型密钥时不注册：其余功能照常可用，也不会带着空密钥去调用模型服务。
