@@ -22,6 +22,15 @@ from .config import get_settings
 from .daily_report.tasks import generate_daily_report, ping, schedule_daily_reports
 from .db import init_db
 
+# ARQ 的 CLI 只给 `arq` 这个 logger 装 handler（见 arq/logs.py 的 default_log_config），
+# 业务 logger 往 root 传播时没有 handler，INFO 级别的调度/入队/执行日志会全部消失。
+# 这里补一个 root handler；已经有 handler 时 basicConfig 什么也不做，不影响 uvicorn 那边。
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
