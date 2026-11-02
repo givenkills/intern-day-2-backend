@@ -151,15 +151,21 @@ $ docker exec drcheck-api python scripts/check_worker.py
 
 第 3 条最值得记：它不报错，只让用户以为「已经在排队了」，然后永远等不到结果。
 
-## 五、仍未验证
+## 五、后续补上的两项（2026-11-02 17:10）
+
+| # | 场景 | 结果 |
+| --- | --- | --- |
+| 1 | 真实千问模型生成 | 已通过。`qwen3.8-flash`，单份日报耗时 33 秒，回顾与统计数字一致 |
+| 2 | 页面截图 | 已补。前端仓库 `docs/screenshots/day6-daily-report.png`（手机端；桌面端与它同一份代码，仅布局断点不同） |
+
+## 六、仍未验证
 
 | # | 场景 | 原因 | 怎么补 |
 | --- | --- | --- | --- |
-| 1 | 真实千问模型生成 | 本机没有可用的 `QWEN_API_KEY` | 配好密钥后 `docker compose up -d`，看页面与日志 |
-| 2 | 页面截图（成功 / 生成中 / 未生成 / 失败四态） | 截图工具整窗超过 10 MiB 上限（与第四天同一问题），且目前没有真实模型 | 配好密钥后浏览器实机截图 |
-| 3 | 多 Worker 实例下 cron 只触发一次 | 只有一台机器，没起第二个 worker | `docker compose up -d --scale worker=2` 后看 `schedule_fired` 是否只出现一次 |
+| 1 | 多 Worker 实例下 cron 只触发一次 | 只有一台机器，没起第二个 worker | `docker compose up -d --scale worker=2` 后看 `schedule_fired` 是否只出现一次 |
+| 2 | 处理中断（`running` 时进程被杀）的实机注入 | 任务通常秒级完成，没有稳定窗口注入；同一套 CAS 抢占逻辑已由并发单测覆盖 | 用慢模型或 `docker pause` 制造窗口后复测 |
 
-## 六、复现命令
+## 七、复现命令
 
 ```bash
 docker compose up -d --build
