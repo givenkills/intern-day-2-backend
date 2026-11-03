@@ -13,7 +13,9 @@ services:
     environment:
       DATABASE_PATH: /data/app.db
       # 允许哪些前端来源跨域访问，多个用英文逗号分隔
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      # https://localhost 是 Capacitor 打包的安卓 App 的 WebView origin，
+  # 与浏览器的 http://localhost:5173 不同，默认就放行，避免 App 一登录就撞预检 400
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost}
       SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-120}
       SEED_ON_STARTUP: ${SEED_ON_STARTUP:-true}
       SEED_USERNAME: ${SEED_USERNAME:-intern}
