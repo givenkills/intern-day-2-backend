@@ -18,6 +18,9 @@ from .schemas import (
     GenerateOut,
     PostponeIn,
     SkipIn,
+    TemplateIn,
+    TemplateOut,
+    TemplateScheduleIn,
     TodayOut,
     WeekOut,
 )
@@ -43,6 +46,57 @@ def today(current_user: CurrentUser, conn: DbConn) -> dict:
 @router.post("/generate", response_model=GenerateOut, summary="生成当天安排")
 def generate(current_user: CurrentUser, conn: DbConn) -> dict:
     return service.generate_today(conn, current_user["id"])
+
+
+# ---- 自定义活动模板 ----
+# 静态路径段要放在 /{activity_id} 之前，避免被动态路由抢先匹配。
+
+
+@router.get(
+    "/templates",
+    response_model=list[TemplateOut],
+    summary="我的活动模板（默认不含已归档）",
+)
+def list_templates(
+    current_user: CurrentUser,
+    conn: DbConn,
+    include_archived: bool = Query(default=False),
+) -> list[dict]:
+    return service.list_templates(conn, current_user["id"], include_archived)
+
+
+@router.post("/templates", response_model=TemplateOut, summary="新建活动模板")
+def create_template(payload: TemplateIn, current_user: CurrentUser, conn: DbConn) -> dict:
+    return service.create_template(conn, current_user["id"], payload.model_dump())
+
+
+@router.put("/templates/{template_id}", response_model=TemplateOut, summary="编辑活动模板")
+def update_template(
+    template_id: int,
+    payload: TemplateIn,
+    current_user: CurrentUser,
+    conn: DbConn,
+) -> dict:
+    return service.update_template(conn, template_id, current_user["id"], payload.model_dump())
+
+
+@router.post("/templates/{template_id}/archive", response_model=TemplateOut, summary="归档活动模板")
+def archive_template(template_id: int, current_user: CurrentUser, conn: DbConn) -> dict:
+    return service.archive_template(conn, template_id, current_user["id"])
+
+
+@router.post(
+    "/templates/{template_id}/schedule",
+    response_model=ActivityOut,
+    summary="把模板加入某天的安排",
+)
+def schedule_template(
+    template_id: int,
+    payload: TemplateScheduleIn,
+    current_user: CurrentUser,
+    conn: DbConn,
+) -> dict:
+    return service.schedule_template(conn, template_id, current_user["id"], payload.model_dump())
 
 
 @router.post("/{activity_id}/complete", response_model=ActivityOut, summary="完成活动")

@@ -99,6 +99,19 @@ CREATE TABLE IF NOT EXISTS activities (
     updated_at        TEXT    NOT NULL
 );
 
+-- 自定义活动模板。archived_at 为 NULL 表示仍可选；归档是软删除，
+-- 已生成的活动不引用模板，因此归档/改名都不会改写历史。
+CREATE TABLE IF NOT EXISTS activity_templates (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name             TEXT    NOT NULL,
+    description      TEXT    NOT NULL,
+    duration_minutes INTEGER NOT NULL DEFAULT 5,
+    archived_at      TEXT,
+    created_at       TEXT    NOT NULL,
+    updated_at       TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
@@ -155,6 +168,8 @@ CREATE INDEX IF NOT EXISTS idx_events_user_time
     ON activity_events(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_quiet_user
     ON quiet_periods(user_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_templates_user_archived
+    ON activity_templates(user_id, archived_at);
 
 -- 幂等的地基：同一个用户同一天只能有一份日报。
 -- 代码里的「先查再插」挡不住并发，这里才是最终保证。

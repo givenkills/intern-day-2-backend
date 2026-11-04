@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import HTTPException, status
 
@@ -229,6 +229,169 @@ def save_settings(conn: sqlite3.Connection, user_id: int, payload: dict) -> dict
         )
     conn.commit()
     return get_settings(conn, user_id)
+
+
+# ---- 活动模板 ----
+
+
+def _template_out(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"],
+        "duration_minutes": row["duration_minutes"],
+        "archived": row["archived_at"] is not None,
+        "archived_at": row["archived_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _load_template(conn: sqlite3.Connection, template_id: int, user_id: int) -> sqlite3.Row:
+    """按 (id, user_id) 查模板；别人的模板一律 404，不暴露是否存在。"""
+    row = conn.execute(
+        "SELECT * FROM activity_templates WHERE id = ? AND user_id = ?",
+        (template_id, user_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模板不存在")
+    return row
+
+
+def list_templates(conn: sqlite3.Connection, user_id: int, include_archived: bool = False) -> list[dict]:
+    sql = "SELECT * FROM activity_templates WHERE user_id = ?"
+    if not include_archived:
+        sql += " AND archived_at IS NULL"
+    sql += " ORDER BY updated_at DESC, id DESC"
+    rows = conn.execute(sql, (user_id,)).fetchall()
+    return [_template_out(r) for r in rows]
+
+
+def create_template(conn: sqlite3.Connection, user_id: int, payload: dict) -> dict:
+    now = to_iso(utcnow())
+    cursor = conn.execute(
+        """
+        INSERT INTO activity_templates (
+            user_id, name, description, duration_minutes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id, payload["name"], payload["description"],
+            payload["duration_minutes"], now, now,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM activity_templates WHERE id = ?", (cursor.lastrowid,)
+    ).fetchone()
+    return _template_out(row)
+
+
+def update_template(conn: sqlite3.Connection, template_id: int, user_id: int, payload: dict) -> dict:
+    row = _load_template(conn, template_id, user_id)
+    if row["archived_at"] is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="模板已归档，无法编辑；如需继续使用请新建模板",
+        )
+
+    now = to_iso(utcnow())
+    conn.execute(
+        "UPDATE activity_templates SET name = ?, description = ?, duration_minutes = ?, updated_at = ? "
+        "WHERE id = ? AND user_id = ?",
+        (
+            payload["name"], payload["description"], payload["duration_minutes"],
+            now, template_id, user_id,
+        ),
+    )
+    conn.commit()
+    return _template_out(_load_template(conn, template_id, user_id))
+
+
+def archive_template(conn: sqlite3.Connection, template_id: int, user_id: int) -> dict:
+    """软归档：只打 archived_at，不碰已生成的活动；重复归档保持幂等。"""
+    row = _load_template(conn, template_id, user_id)
+    if row["archived_at"] is None:
+        now = to_iso(utcnow())
+        conn.execute(
+            "UPDATE activity_templates SET archived_at = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (now, now, template_id, user_id),
+        )
+        conn.commit()
+        row = _load_template(conn, template_id, user_id)
+    return _template_out(row)
+
+
+def _validate_duration_fits(view: SettingsView, minutes: int, duration: int) -> None:
+    """时长必须完整落在同一个可活动窗口内，且不跨入免打扰时段。"""
+    window = next((w for w in view.windows if w.start <= minutes < w.end), None)
+    if window is None or minutes + duration > window.end:
+        raise HTTPException(
+            status_code=422,
+            detail=f"活动时长 {duration} 分钟超出可活动时段，请缩短时长或换个时间",
+        )
+    for q in view.quiet:
+        if minutes < q.end and q.start < minutes + duration:
+            quiet_range = f"{format_time(q.start)}-{format_time(q.end)}"
+            raise HTTPException(
+                status_code=422,
+                detail=f"活动时长与免打扰时段（{quiet_range}）冲突",
+            )
+
+
+def schedule_template(
+    conn: sqlite3.Connection,
+    template_id: int,
+    user_id: int,
+    payload: dict,
+) -> dict:
+    """把模板加入某天的安排：校验全部通过才插一条 planned，避免半条数据。
+
+    标题、描述、时长在这里一次性复制到 activities；之后改模板或归档模板，
+    都不会回写任何已有活动。
+    """
+    template = _load_template(conn, template_id, user_id)
+    if template["archived_at"] is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="模板已归档，无法加入安排",
+        )
+
+    day = date.fromisoformat(payload["plan_date"])
+    if day < local_today():
+        raise HTTPException(status_code=422, detail="不能把活动安排到已经过去的日期")
+
+    duration = payload.get("duration_minutes") or template["duration_minutes"]
+    minutes = parse_time(payload["time"])
+    scheduled = local_date_to_utc_iso(day, minutes)
+
+    view = _settings_view(conn, user_id)
+    _validate_slot_time(view, scheduled)
+    _validate_duration_fits(view, minutes, duration)
+    _validate_no_time_conflict(conn, user_id, day.isoformat(), minutes, duration)
+
+    now = to_iso(utcnow())
+    cursor = conn.execute(
+        """
+        INSERT INTO activities (
+            user_id, activity_type, title, description, plan_date, scheduled_at,
+            duration_minutes, status, source, created_at, updated_at
+        ) VALUES (?, 'custom', ?, ?, ?, ?, ?, 'planned', 'template', ?, ?)
+        """,
+        (
+            user_id, template["name"], template["description"], day.isoformat(),
+            scheduled, duration, now, now,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO activity_events "
+        "(activity_id, user_id, action, from_status, to_status, note, created_at) "
+        "VALUES (?, ?, 'create', NULL, 'planned', ?, ?)",
+        (cursor.lastrowid, user_id, f"template:{template_id}", now),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM activities WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return _activity_out(row)
 
 
 # ---- 今日活动 ----
