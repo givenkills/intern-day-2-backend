@@ -83,7 +83,8 @@ def main() -> None:
         record("既有功能·登录", r.status_code == 200 and bool(token), f"HTTP {r.status_code}")
 
         r = c.get(f"{api}/auth/me", headers={"Authorization": f"Bearer {token}"})
-        record("既有功能·获取当前用户", r.status_code == 200, f"用户 {r.json().get('display_name') if r.status_code == 200 else '-'}")
+        display = r.json().get("display_name") if r.status_code == 200 else "-"
+        record("既有功能·获取当前用户", r.status_code == 200, f"用户 {display}")
 
         h = {"Authorization": f"Bearer {token}"}
         created = c.post(f"{api}/todos", json={"title": f"验收自测 {uuid.uuid4().hex[:6]}"}, headers=h)
@@ -92,8 +93,13 @@ def main() -> None:
         deleted = c.delete(f"{api}/todos/{todo_id}", headers=h) if todo_id else None
         record(
             "既有功能·待办增改删",
-            bool(todo_id) and updated is not None and updated.status_code == 200 and deleted is not None and deleted.status_code in (200, 204),
-            f"新建/改状态/删除 HTTP {created.status_code}/{updated.status_code if updated else '-'}/{deleted.status_code if deleted else '-'}",
+            bool(todo_id)
+            and updated is not None
+            and updated.status_code == 200
+            and deleted is not None
+            and deleted.status_code in (200, 204),
+            f"新建/改状态/删除 HTTP {created.status_code}/"
+            f"{updated.status_code if updated else '-'}/{deleted.status_code if deleted else '-'}",
         )
 
         # ---------- 2. 未登录 / 伪造令牌 ----------
@@ -117,15 +123,20 @@ def main() -> None:
                f"HTTP {status}，事件 {len(events)} 个，回复 {len(reply1)} 字")
 
         increment = events.count("TEXT_MESSAGE_CONTENT")
-        span = 0.0
         record("流式输出（增量且分散到达）", increment >= 5, f"{increment} 个文本增量")
 
         # ---------- 4. 多轮上下文 ----------
         history = [
-            {"id": str(uuid.uuid4()), "role": "user", "content": "记住一个虚构昵称：小海豹。之后叫你时就用这个名字。"},
+            {
+                "id": str(uuid.uuid4()),
+                "role": "user",
+                "content": "记住一个虚构昵称：小海豹。之后叫你时就用这个名字。",
+            },
             {"id": str(uuid.uuid4()), "role": "assistant", "content": reply1},
         ]
-        _, events2, reply2, _ = stream_run(c, runtime, token, thread, "我刚才让你记的昵称是什么？只回答昵称。", history)
+        _, events2, reply2, _ = stream_run(
+            c, runtime, token, thread, "我刚才让你记的昵称是什么？只回答昵称。", history
+        )
         record("多轮上下文", "海豹" in reply2, f"第二轮回答「{reply2.strip()[:20]}」")
 
         # ---------- 5. 工具真实执行 ----------
@@ -159,7 +170,11 @@ def main() -> None:
         # 用 A 的 threadId、B 的身份请求：数据仍应是 B 的
         _, _, _, tool_mix = stream_run(c, runtime, token_b, thread, "我还有哪些待办？")
         owner_mix = json.loads(tool_mix[0]).get("owner") if tool_mix else None
-        record("threadId 不能当登录凭证", owner_mix == "验收二", f"拿 A 的 threadId 用 B 的令牌，返回 owner={owner_mix}")
+        record(
+            "threadId 不能当登录凭证",
+            owner_mix == "验收二",
+            f"拿 A 的 threadId 用 B 的令牌，返回 owner={owner_mix}",
+        )
 
         _ = token_a
 
