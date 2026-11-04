@@ -24,8 +24,10 @@ x-backend-env: &backend-env
   DAILY_REPORT_MAX_JOBS: ${DAILY_REPORT_MAX_JOBS:-4}
   # 仅演示/补跑时设置，正常留空
   DAILY_REPORT_TARGET_DATE: ${DAILY_REPORT_TARGET_DATE:-}
-  # 允许哪些前端来源跨域访问，多个用英文逗号分隔
-  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  # 允许哪些前端来源跨域访问，多个用英文逗号分隔。
+  # https://localhost 是 Capacitor 安卓 App 的 WebView origin（androidScheme 默认 https），
+  # 与浏览器的 http://localhost:5173 不同，默认放行，避免 App 登录时预检 400
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost}
   SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-120}
   SEED_ON_STARTUP: ${SEED_ON_STARTUP:-true}
   SEED_USERNAME: ${SEED_USERNAME:-intern}
