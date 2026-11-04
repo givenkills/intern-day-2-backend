@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 防止同一分支重复并发，新推送取消旧任务
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: 安装 / 代码检查 / 单测
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: 配置 Python 3.11
+        run: uv python install 3.11
+
+      - name: 同步依赖
+        run: uv sync --locked
+
+      - name: 代码检查
+        run: uv run ruff check .
+
+      - name: 单元测试
+        run: uv run pytest

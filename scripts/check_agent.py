@@ -107,13 +107,25 @@ def main() -> None:
 
         print("[2/4] 登录并开始第一轮")
         token = login(client, base_url, args.username, args.password)
-        messages = [{"id": str(uuid.uuid4()), "role": "user", "content": "记住一个虚构昵称：小海豹。之后我叫你的时候就用这个名字。"}]
+        messages = [
+            {
+                "id": str(uuid.uuid4()),
+                "role": "user",
+                "content": "记住一个虚构昵称：小海豹。之后我叫你的时候就用这个名字。",
+            }
+        ]
         reply1, events1, _ = run_agent(client, base_url, token, thread_id, messages)
         print(f"  收到 {len(events1)} 个事件，助手回复：{reply1[:80]}")
         messages.append({"id": str(uuid.uuid4()), "role": "assistant", "content": reply1})
 
         print("[3/4] 第二轮：追问上一轮说的昵称")
-        messages.append({"id": str(uuid.uuid4()), "role": "user", "content": "我刚才让你记的昵称是什么？只回答昵称本身。"})
+        messages.append(
+            {
+                "id": str(uuid.uuid4()),
+                "role": "user",
+                "content": "我刚才让你记的昵称是什么？只回答昵称本身。",
+            }
+        )
         reply2, events2, _ = run_agent(client, base_url, token, thread_id, messages)
         print(f"  收到 {len(events2)} 个事件，助手回复：{reply2[:80]}")
         if "海豹" not in reply2:

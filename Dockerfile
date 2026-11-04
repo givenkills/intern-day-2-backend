@@ -26,6 +26,8 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
+# 运维脚本要能在容器里跑（README 的造数据、Worker 自检、指定日期补跑都靠它）
+COPY scripts ./scripts
 
 RUN mkdir -p /data
 

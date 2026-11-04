@@ -1,6 +1,47 @@
 # 后端独立启动：docker compose up --build
 # 构建上下文就是本仓库根目录，不依赖前端仓库的任何文件。
+#
+# 服务一览：
+#   backend  登录 / 活动 / 日报查询等 HTTP 接口（uvicorn）
+#   worker   ARQ 后台任务：定时调度 + 生成日报（同一镜像，不同启动命令）
+#   redis    队列、调度与任务状态（不对外暴露端口）
 name: intern-day-2-backend
+
+# api 与 worker 必须用完全相同的数据库配置，否则会出现
+# "worker 说生成成功、接口却查不到" —— 那其实是两个不同的库文件。
+x-backend-env: &backend-env
+  DATABASE_PATH: /data/app.db
+  # 容器内用 Compose 服务名 redis；写 localhost 会指向容器自己
+  REDIS_URL: redis://redis:6379/0
+  # 日报归属时区与调度时间（显式配置，不依赖容器 TZ）
+  DAILY_REPORT_TIMEZONE: ${DAILY_REPORT_TIMEZONE:-Asia/Shanghai}
+  DAILY_REPORT_CRON_HOUR: ${DAILY_REPORT_CRON_HOUR:-0}
+  DAILY_REPORT_CRON_MINUTE: ${DAILY_REPORT_CRON_MINUTE:-5}
+  DAILY_REPORT_MAX_TRIES: ${DAILY_REPORT_MAX_TRIES:-3}
+  DAILY_REPORT_JOB_TIMEOUT: ${DAILY_REPORT_JOB_TIMEOUT:-180}
+  DAILY_REPORT_AGENT_TIMEOUT: ${DAILY_REPORT_AGENT_TIMEOUT:-45}
+  DAILY_REPORT_LEASE_SECONDS: ${DAILY_REPORT_LEASE_SECONDS:-600}
+  DAILY_REPORT_MAX_JOBS: ${DAILY_REPORT_MAX_JOBS:-4}
+  # 仅演示/补跑时设置，正常留空
+  DAILY_REPORT_TARGET_DATE: ${DAILY_REPORT_TARGET_DATE:-}
+  # 允许哪些前端来源跨域访问，多个用英文逗号分隔
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-120}
+  SEED_ON_STARTUP: ${SEED_ON_STARTUP:-true}
+  SEED_USERNAME: ${SEED_USERNAME:-intern}
+  SEED_PASSWORD: ${SEED_PASSWORD:-intern123456}
+  SEED_DISPLAY_NAME: ${SEED_DISPLAY_NAME:-练习同学}
+  SEED_SAMPLE_TODOS: ${SEED_SAMPLE_TODOS:-true}
+  # 手机验证码：练习环境用模拟通道，验证码会写日志并可通过接口返回
+  APP_SECRET: ${APP_SECRET:-dev-only-please-change-me}
+  SMS_DEBUG_RETURN_CODE: ${SMS_DEBUG_RETURN_CODE:-true}
+  SMS_CODE_TTL_SECONDS: ${SMS_CODE_TTL_SECONDS:-300}
+  SMS_RESEND_SECONDS: ${SMS_RESEND_SECONDS:-60}
+  # 模型服务：密钥只在这里注入，不进镜像、不进前端
+  QWEN_API_KEY: ${QWEN_API_KEY:-}
+  QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  QWEN_MODEL: ${QWEN_MODEL:-qwen-plus}
+  AGENT_TOOL_TODO_LIMIT: ${AGENT_TOOL_TODO_LIMIT:-20}
 
 services:
   backend:
@@ -10,32 +51,16 @@ services:
     ports:
       # 宿主机端口 -> 容器端口；浏览器访问 http://localhost:8000
       - "${BACKEND_PORT:-8000}:8000"
-    environment:
-      DATABASE_PATH: /data/app.db
-      # 允许哪些前端来源跨域访问，多个用英文逗号分隔
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-120}
-      SEED_ON_STARTUP: ${SEED_ON_STARTUP:-true}
-      SEED_USERNAME: ${SEED_USERNAME:-intern}
-      SEED_PASSWORD: ${SEED_PASSWORD:-intern123456}
-      SEED_DISPLAY_NAME: ${SEED_DISPLAY_NAME:-练习同学}
-      SEED_SAMPLE_TODOS: ${SEED_SAMPLE_TODOS:-true}
-      # 手机验证码：练习环境用模拟通道，验证码会写日志并可通过接口返回
-      APP_SECRET: ${APP_SECRET:-dev-only-please-change-me}
-      SMS_DEBUG_RETURN_CODE: ${SMS_DEBUG_RETURN_CODE:-true}
-      SMS_CODE_TTL_SECONDS: ${SMS_CODE_TTL_SECONDS:-300}
-      SMS_RESEND_SECONDS: ${SMS_RESEND_SECONDS:-60}
-      # 模型服务：密钥只在这里注入，不进镜像、不进前端
-      QWEN_API_KEY: ${QWEN_API_KEY:-}
-      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
-      QWEN_MODEL: ${QWEN_MODEL:-qwen-plus}
-      AGENT_TOOL_TODO_LIMIT: ${AGENT_TOOL_TODO_LIMIT:-20}
+    environment: *backend-env
     volumes:
       # 命名卷保存 SQLite 文件，容器重建后账号和待办仍然存在
       - backend-data:/data
     networks:
       # 前端仓库的 CopilotKit Runtime 在同一个网络里用服务名 backend 访问它
       - agent-net
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -48,8 +73,50 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # 和 backend 同一个镜像、同一个数据卷、同一份环境变量，
+  # 只有启动命令不同：一个是 uvicorn，一个是 arq。进程必须分开。
+  worker:
+    build:
+      context: .
+    image: intern-day-2-backend:local
+    command: ["arq", "app.worker.WorkerSettings"]
+    environment: *backend-env
+    volumes:
+      - backend-data:/data
+    networks:
+      - agent-net
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    # AOF everysec：最多丢 1 秒写入，够本地练习用；RDB 快照作为兜底
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "900 1"
+    volumes:
+      - redis-data:/data
+    # 刻意不 publish 端口：队列只在容器网络内可达，不暴露到宿主机/公网。
+    # 需要在宿主机调试时临时加 127.0.0.1:6379:6379（只绑本机回环）。
+    networks:
+      - agent-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   backend-data:
+  redis-data:
 
 networks:
   # 两个仓库分别独立的 Compose 项目，靠这个显式命名的网络互通。

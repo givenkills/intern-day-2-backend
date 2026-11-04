@@ -31,6 +31,201 @@
 
 ---
 
+## 第六天新增：每日活动总结（Redis + ARQ）
+
+关掉浏览器，服务器也会在每天 **00:05（Asia/Shanghai）** 把前一天的总结做出来：Worker 读库算统计 → 交给 Agent 写两句人话 → 校验 → 存进 `daily_reports`，页面只负责查。
+
+| 项 | 值 |
+| --- | --- |
+| 功能分支 | `feat/daily-summary-queue`（基于 `feat/day-5-activity-assistant`，因为第五天的活动助手还没合进 `main`） |
+| 新增服务 | `worker`（ARQ 进程）与 `redis`（队列），`worker` 与 `backend` **共用同一个镜像** |
+| 数据表 | 新增 `daily_reports`；统计复用第五天的 `activities` / `activity_events` |
+| 接口 | `GET /reports/{date}`、`POST /reports/{date}/generate`，详见 [`docs/api-day-6.md`](docs/api-day-6.md) |
+| 依赖 | `arq==0.28.0`（自动带 `redis==5.3.1`），已固定版本并写入 `uv.lock` |
+| 测试 | `uv run pytest` → 121 passed；`ruff check` 零告警 |
+
+### 组件分工（对应任务说明第二节的五个问题）
+
+**① Redis 和业务数据库的分工**
+
+Redis 存「还没发生的事」：待执行的 job、cron 的下次触发时间、任务状态与结果。它快、可以丢、丢了能重建。业务库存「已经发生的事」：谁在哪天完成了什么，有唯一约束、要能查一年、要能审计。所以**日报只住在 SQLite 里**，Redis 里那份只是任务结果缓存，`keep_result` 一过就没了。反过来，把队列塞进业务库会带来轮询和锁竞争，也不合适。
+
+**② ARQ 的四个动作**
+
+- 注册：`WorkerSettings.functions` 里列出可被调用的协程（`func(...)` 可以给单个函数配 `max_tries` / `timeout`）。
+- 投递：`await redis.enqueue_job("generate_daily_report", user_id, "2026-11-01", _job_id="daily-report:1:2026-11-01")`。参数会被序列化，所以只传 id 和日期，不传对象。
+- 启动：`arq app.worker.WorkerSettings`，CLI 读这个类的属性。
+- 定时：`cron_jobs` 里放 `cron(schedule_daily_reports, hour=0, minute=5)`，**时区由 `WorkerSettings.timezone` 决定**。不设就用系统时区——这是最容易踩的坑，容器里系统时区通常是 UTC，00:05 会变成北京时间 08:05。本项目显式传 `Asia/Shanghai`。
+
+**③ API 和 Worker 为什么要分成两个进程**
+
+一是职责不同：Worker 是长驻轮询进程，塞进 API 会和请求抢事件循环。二是故障隔离：Worker 崩了登录照常能用，API 发版重启也不会打断正在跑的总结。三是模型调用很慢（几秒到几十秒），放在 HTTP 请求里会把连接和内存一起拖住。共用镜像只是省一次构建，启动命令是两条：`uvicorn ...` 和 `arq app.worker.WorkerSettings`。
+
+**④ 为什么同一个任务可能被执行两次**
+
+ARQ 是「悲观执行」：任务成功前不会被确认移除。Worker 被 kill、容器重启、`Retry` 触发，任务都会重新入队；`enqueue_job` 网络超时也可能「其实投递成功了」。所以幂等不是加分项，是设计的一部分——本项目的保底手段是数据库唯一索引，见第 4 节。
+
+**⑤ 三种「成功」不要混为一谈**
+
+| 阶段 | 日志关键字 | 失败意味着 |
+| --- | --- | --- |
+| 调度成功 | `schedule_fired date=... users=N` | cron 没触发，或时区算错 |
+| 入队成功 | `job_enqueued job_id=...` | Redis 连不上 / 序列化失败 |
+| 执行成功 | `job_succeeded job_id=... attempt=1` | 统计、模型或写库出错 |
+
+### 日报日期与统计口径
+
+**日报日期就是 `activities.plan_date`**，也就是记录所属的自然日（Asia/Shanghai）。本地 `00:00` 对应 UTC 前一天 `16:00`，所以凡是要按时间区间过滤的地方（推迟事件）都换算成 UTC 后左闭右开：`2026-11-01T16:00:00+00:00 <= created_at < 2026-11-02T16:00:00+00:00`。23:59 属于当天，次日 00:00 属于下一天。
+
+**跨日推迟怎么办？** 本项目的推迟**不会跨日**：`postpone_activity` 要求新时间落在当天的工作时段内，`plan_date` 保持不变。所以一条活动永远只属于一个日期，不存在「在两天里各算一次」的问题。如果以后允许推到明天，需要同步改统计口径，这里先写清楚现状。
+
+**推迟不重复计数**：一条活动推迟两次会产生 3 行记录（2 行 `postponed` + 1 行 `planned`）。统计时只把 `postponed` 以外的记录算进计划数，推迟链上的中间记录只贡献「操作次数」。
+
+| 指标 | 定义 |
+| --- | --- |
+| `planned` | 当天 `status != 'postponed'` 的记录数 |
+| `completed` | 其中 `status = 'completed'` |
+| `skipped` | 其中 `status = 'skipped'` |
+| `uncompleted` | `planned - completed - skipped`（用减法，不另查一次，避免状态枚举漏项时数字对不上） |
+| `postponed_ops` | `activity_events` 里 `action='postpone'` 且 `created_at` 落在当天的条数 |
+
+两条硬规则：
+
+1. **恒等式** `planned == completed + skipped + uncompleted`。写库前会再断言一次。
+2. **`postponed_ops` 是操作次数，与 `completed` 可以重叠**（一条活动推迟后又完成了，两边各 +1），所以**不能相加**去算总活动数。
+
+示例（`scripts/seed_demo_data.py` 造的就是这份数据）：
+
+| 活动 | 计划 | 操作 | 最终 |
+| --- | --- | --- | --- |
+| A1 | 09:30 | 完成 | completed |
+| A2 | 11:00 | 完成 | completed |
+| A3 | 14:00 | 今天不方便 | skipped |
+| A4 | 16:00 | 无操作 | planned |
+| A5 | 17:00 | 推迟到 17:30 后完成 | 原行 postponed + 新行 completed |
+
+→ `planned=5 · completed=3 · skipped=1 · uncompleted=1 · postponed_ops=1`，`5 = 3+1+1`。
+
+**久坐**：目前没有用户自报久坐时长的入口，`daily_reports.sedentary_minutes` 恒为 `NULL`，表示「未记录」，页面显示「未记录（无法判断实际久坐时长）」。它**不等于 0 分钟**，也不能拿「未完成活动的时间」倒推。
+
+### 调度与执行
+
+```text
+00:05 cron 触发
+  └─ schedule_daily_reports：目标日期 = 本地昨天（可用 DAILY_REPORT_TARGET_DATE 覆盖）
+       └─ 查出「有设置 / 有活动 / 已有日报」的用户并集，逐个 enqueue
+            └─ generate_daily_report(user_id, date)
+                 ├─ 占位 + 抢占（CAS）→ 抢不到直接退出
+                 ├─ 读活动 + 事件，算 5 个指标
+                 ├─ 调 Agent（不持有数据库连接）
+                 ├─ 5 道校验
+                 └─ 写 success / 写 failed
+```
+
+- 任务参数只有 `user_id` 和 `report_date`，其余全部从库里现读；日志里也只打这两个 + `job_id`。
+- 每个用户单独投递、单独执行，一个失败不影响其他用户（调度循环里逐个 `try/except`）。
+- `job_id = daily-report:{user_id}:{report_date}`，重复点击/重复调度不会排两条。
+- 演示时把 `DAILY_REPORT_CRON_MINUTE` 改成「下一分钟」，日志里能看到完整四段（见第 5 节）。
+
+### 幂等、失败与重试
+
+**唯一约束是地基**：`daily_reports` 上有 `UNIQUE(user_id, report_date)`。写库只走 `INSERT ... ON CONFLICT DO NOTHING`，**不允许「先查再插」**。
+
+**抢占是条件更新**（不是查了再改）：
+
+```sql
+UPDATE daily_reports
+   SET status='running', attempt=attempt+1, locked_at=?
+ WHERE user_id=? AND report_date=?
+   AND (status IN ('pending','failed')
+        OR (status='running' AND locked_at < 租约截止时间))
+```
+
+`rowcount = 0` 就说明：已经有成功结果（直接复用），或者另一个 Worker 正在跑（直接退出）。写成功/写失败也都带 `AND status='running'`，所以不会覆盖别人做好的日报。
+
+**任务状态**：`pending`（已入队）→ `running`（有 Worker 抢到）→ `success` / `failed`。租约 10 分钟：Worker 崩溃后 `running` 会卡住，超过租约允许别的实例接管；已有 `success` 的行永远不会被再次执行。
+
+**失败怎么处理**：
+
+| 错误 | 重试 | 最终 |
+| --- | --- | --- |
+| 模型超时 / 上游 5xx / 网络抖动 | 是，退避 `30s × 第几次` | 3 次后 `failed` |
+| 输出不是合法 JSON、数字对不上、出现久坐时长 | 就地重写 1 次 | 仍不合格 → `failed` |
+| 缺 `QWEN_API_KEY`、日期参数非法 | **不重试**（重试多少次都一样） | `failed`，日志说明原因 |
+
+失败只写 `error_code` + 内部 `error_detail`，接口只回一句人话（如「模型服务暂时不可用，总结未生成」），不返回堆栈。
+
+### 启动、演示与补跑
+
+```bash
+# 1) 三件套一起起来（backend + worker + redis）
+cp .env.example .env          # 填 QWEN_API_KEY
+docker compose up --build -d
+docker compose ps             # backend healthy、worker running、redis healthy
+docker compose logs -f worker # 应看到 worker_ready ... timezone=Asia/Shanghai cron=00:05
+
+# 2) 造昨天的演示数据
+docker compose exec backend python scripts/seed_demo_data.py --date $(date -d yesterday +%F)
+
+# 3) 只验证「Worker 连上 Redis 并能执行任务」（不碰模型）
+docker compose exec backend python scripts/check_worker.py
+
+# 4) 演示自动调度：把 cron 临时改成「两分钟后」
+#    注意 hour 和 minute 都要改——只改分钟的话，小时还是 0，下一次触发要等到凌晨
+NEXT_H=$(date -d '+2 min' +%-H); NEXT_M=$(date -d '+2 min' +%-M)
+DAILY_REPORT_CRON_HOUR=$NEXT_H DAILY_REPORT_CRON_MINUTE=$NEXT_M docker compose up -d worker
+docker compose logs -f worker | grep -E "schedule_fired|job_enqueued|job_started|job_succeeded"
+
+# 5) 恢复默认（00:05）
+docker compose up -d worker
+```
+
+真实跑出来的日志长这样（时间戳是本地时间，说明时区配置生效）：
+
+```text
+15:08:00: cron:schedule_daily_reports()
+15:08:00: job_enqueued job_id=daily-report:1:2026-11-01 user=1 date=2026-11-01
+15:08:00: schedule_fired date=2026-11-01 users=1 enqueued=1 duplicates=0 failed=0
+15:08:01: daily-report:1:2026-11-01:generate_daily_report(1, '2026-11-01')
+15:08:01: job_started user=1 date=2026-11-01 attempt=1 planned=5 completed=3 skipped=1 uncompleted=1 postponed_ops=1
+15:08:01: job_succeeded user=1 date=2026-11-01 attempt=1 review_len=30
+```
+
+**补跑指定日期**（服务停机时漏掉的那天，不会自动补，只能手动补）：
+
+```bash
+# 命令行
+docker compose exec backend python scripts/check_worker.py --enqueue 1 2026-11-01
+# 或者用接口（只能操作当前登录用户）
+curl -X POST http://localhost:8000/reports/2026-11-01/generate -H "Authorization: Bearer $TOKEN"
+```
+
+也可以设 `DAILY_REPORT_TARGET_DATE=2026-11-01` 让调度固定生成那一天，只用于演示。
+
+### 容器与数据卷
+
+| 服务 | 启动命令 | 说明 |
+| --- | --- | --- |
+| `backend` | `uvicorn app.main:app --host 0.0.0.0 --port 8000` | 对宿主机暴露 8000 |
+| `worker` | `arq app.worker.WorkerSettings` | 不暴露端口，与 backend 同镜像 |
+| `redis` | `redis-server --appendonly yes --appendfsync everysec` | 不 publish 端口 |
+
+- **API 与 Worker 的 `DATABASE_PATH` 必须完全一致**（`/data/app.db`），并且挂同一个命名卷 `backend-data`。写成相对路径会变成各自容器里的两份副本，症状是「Worker 说成功、接口查不到」。
+- **Redis 持久化**：AOF `everysec`（最多丢 1 秒写入）+ RDB `save 900 1` 兜底。要说清楚的是：Redis 持久化**不是业务数据的保障**，日报在 SQLite 里；Redis 丢了只意味着排队中的任务需要重新投递。
+- **不把 Redis 暴露出去**：compose 里没有 `ports`，队列只在容器网络内可达。本地调试需要时临时加 `127.0.0.1:6379:6379`（只绑回环），公网部署必须加 `requirepass`。
+- **SQLite 并发**：开启 WAL（一写多读）+ `busy_timeout=5000` + 短事务。Worker 调模型时**不持有任何数据库连接**，否则 API 那边的写会卡到超时。`max_jobs=4` 也是因为 SQLite 只有单写者。
+
+### 已知限制
+
+- **不自动补跑**：服务在 00:05 停着，那天的日报不会自己补，必须用上面的补跑命令。cron 不会「补齐所有遗漏日期」。
+- `_job_id` 去重只在 `keep_result`（24 小时）内有效，超过一天同 id 可以再次入队——真正的幂等靠数据库唯一约束，不靠 Redis。
+- 失败补跑会自动换一代 job_id（`...:r2`、`...:r3`）：旧任务的结果还在 Redis 里保留着，沿用原 id 会被 ARQ 当成「已存在」，补跑就静默失效了。这一点是在演示里踩出来的。
+- 单 Worker 实例，没有高可用；多实例时 cron 的 `unique=True` 可以避免同一时刻重复调度。
+- 模型输出做了数字白名单校验，但只覆盖阿拉伯数字；用中文数字写的「三项」不会被拦（提示词里已要求不要用）。
+- 第五天的活动助手分支还没合进 `main`，本分支是叠在它上面的，合并顺序需要先第五天再本分支。
+
+---
+
 ## 第四天新增：Agent 评测与优化
 
 在第三天的 Agent 上建立了可重复的评测基线，按基线失败项做了两处优化，并用同一组用例复测。
@@ -384,6 +579,12 @@ docker compose logs --tail=100
 - 接口文档：<http://localhost:8000/docs>
 - 健康检查：`curl http://localhost:8000/health`
 
+`up` 会同时拉起 `backend`、`worker`、`redis` 三个服务（见「第六天新增」）。只想起接口不跑后台任务时：
+
+```bash
+docker compose up -d backend
+```
+
 停止并重新创建（数据保留在卷里）：
 
 ```bash
@@ -518,7 +719,8 @@ uv run python -m app.seed
 
 ## 10. 已知问题与限制
 
-- 使用 SQLite 单文件，未做并发写优化；练习规模下够用，不适合多实例部署。
+- 使用 SQLite 单文件，未做并发写优化；练习规模下够用，不适合多实例部署。第六天开了 WAL、把写事务压短，并在建连接处加了一把锁（Windows 上多线程同时打开 WAL 库会偶发 `attempt to write a readonly database`），但没有改变「单写者」这个前提。
+- 每日总结**不会自动补齐停机期间漏掉的日期**，只能用补跑接口或脚本指定日期重跑（见「第六天新增 · 启动、演示与补跑」）。
 - 令牌保存在浏览器 `localStorage`，存在 XSS 风险；生产环境应改为 HttpOnly Cookie + CSRF 防护。
 - **短信通道是模拟的**：验证码只写日志、开发模式下还会通过接口返回，生产环境必须换成真实 `SmsSender` 并关闭 `SMS_DEBUG_RETURN_CODE`。
 - 未实现登录失败次数限制与账号锁定（验证码有次数限制，密码登录没有）。
@@ -538,19 +740,35 @@ intern-day-2-backend/
 │   └── pull_request_template.md
 ├── app/
 │   ├── main.py             # 应用入口、CORS、校验错误处理
+│   ├── worker.py           # ARQ WorkerSettings：任务注册、cron、时区、重试
 │   ├── config.py           # 环境变量配置
-│   ├── db.py               # SQLite 建表、轻量迁移与连接
+│   ├── db.py               # SQLite 建表、轻量迁移与连接（WAL + busy_timeout）
 │   ├── security.py         # 密码哈希、令牌、验证码哈希、时间工具
 │   ├── deps.py             # 数据库连接与登录校验依赖
 │   ├── schemas.py          # 请求/响应模型、手机号校验
 │   ├── sms.py              # 验证码生成/频控/校验 + 短信通道抽象
 │   ├── seed.py             # 练习账号初始化
-│   └── routers/
-│       ├── auth.py         # 发送验证码 / 注册 / 登录 / 当前用户 / 退出
-│       └── todos.py        # 待办增删改查
-├── tests/                  # pytest 用例（含多账户隔离）
+│   ├── routers/
+│   │   ├── auth.py         # 发送验证码 / 注册 / 登录 / 当前用户 / 退出
+│   │   └── todos.py        # 待办增删改查
+│   ├── activity/           # 第五天：设置、排期、完成/推迟/跳过、周统计
+│   ├── agent/              # 第三天：Agent 组装、AG-UI 入口、身份 ContextVar
+│   └── daily_report/       # 第六天：每日总结
+│       ├── stats.py        # 统计口径（纯 SQL，模型不参与）
+│       ├── store.py        # daily_reports 读写 + CAS 抢占
+│       ├── agent.py        # 写总结 + 5 道事实校验
+│       ├── service.py      # 编排：抢占 → 统计 → 模型 → 落库
+│       ├── tasks.py        # ARQ 任务：调度 + 单用户执行 + ping
+│       ├── queue.py        # Redis 连接池、job_id、入队失败语义
+│       ├── router.py       # GET /reports/{date}、POST .../generate
+│       └── schemas.py      # 响应模型
+├── docs/                   # 每日接口说明、Agent 说明、自测记录
+├── scripts/
+│   ├── check_worker.py     # Worker 连通性自检 / 指定日期补跑
+│   └── seed_demo_data.py   # 造某一天的演示活动数据
+├── tests/                  # pytest 用例（含统计口径与幂等并发）
 ├── Dockerfile              # 运行镜像（多阶段，按 uv.lock 安装）
-├── compose.yaml            # 独立启动后端
+├── compose.yaml            # backend + worker + redis
 ├── pyproject.toml
 └── uv.lock
 ```
