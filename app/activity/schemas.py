@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from pydantic import BaseModel, Field, field_validator
 
 from .timeutil import is_valid_time, parse_time
@@ -9,6 +11,12 @@ from .timeutil import is_valid_time, parse_time
 # 每天安排次数范围
 DAILY_TARGET_MIN = 1
 DAILY_TARGET_MAX = 8
+
+# 自定义模板的字段范围
+TEMPLATE_NAME_MAX = 40
+TEMPLATE_DESCRIPTION_MAX = 200
+TEMPLATE_DURATION_MIN = 1
+TEMPLATE_DURATION_MAX = 120
 
 # 活动状态枚举
 STATUS_PLANNED = "planned"
@@ -141,6 +149,66 @@ class GenerateOut(BaseModel):
     planned: int
     notice: str | None = None
     activities: list[ActivityOut]
+
+
+class TemplateIn(BaseModel):
+    """创建/编辑模板。刻意不包含 user_id：归属只认登录身份。"""
+
+    name: str = Field(min_length=1, max_length=TEMPLATE_NAME_MAX)
+    description: str = Field(min_length=1, max_length=TEMPLATE_DESCRIPTION_MAX)
+    duration_minutes: int = Field(
+        default=5,
+        ge=TEMPLATE_DURATION_MIN,
+        le=TEMPLATE_DURATION_MAX,
+    )
+
+    @field_validator("name", "description")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("不能只包含空格")
+        return value
+
+
+class TemplateOut(BaseModel):
+    id: int
+    name: str
+    description: str
+    duration_minutes: int
+    archived: bool
+    archived_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class TemplateScheduleIn(BaseModel):
+    """把模板加入某天的安排：日期 + 开始时间 + 可选时长（默认用模板时长）。"""
+
+    plan_date: str
+    time: str
+    duration_minutes: int | None = Field(
+        default=None,
+        ge=TEMPLATE_DURATION_MIN,
+        le=TEMPLATE_DURATION_MAX,
+    )
+
+    @field_validator("plan_date")
+    @classmethod
+    def _valid_date(cls, value: str) -> str:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"日期格式应为 YYYY-MM-DD，收到「{value}」") from None
+        # fromisoformat 还接受 20261104 / ISO 周日期等写法，这里只放行严格的 YYYY-MM-DD
+        if parsed.isoformat() != value:
+            raise ValueError(f"日期格式应为 YYYY-MM-DD，收到「{value}」")
+        return value
+
+    @field_validator("time")
+    @classmethod
+    def _valid_time(cls, value: str) -> str:
+        return _check_time(value)
 
 
 class SkipIn(BaseModel):
