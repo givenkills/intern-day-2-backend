@@ -49,6 +49,60 @@ CREATE TABLE IF NOT EXISTS verification_codes (
     consumed_at TEXT,
     attempts    INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS activity_settings (
+    user_id           INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    work_start        TEXT    NOT NULL,
+    work_end          TEXT    NOT NULL,
+    morning_start     TEXT,
+    morning_end       TEXT,
+    afternoon_start   TEXT,
+    afternoon_end     TEXT,
+    daily_target      INTEGER NOT NULL DEFAULT 3,
+    reminders_enabled INTEGER NOT NULL DEFAULT 1,
+    allow_in_worktime INTEGER NOT NULL DEFAULT 1,
+    postpone_policy   TEXT    NOT NULL DEFAULT 'next_slot',
+    timezone          TEXT    NOT NULL DEFAULT 'Asia/Shanghai',
+    updated_at        TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quiet_periods (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    start_time TEXT    NOT NULL,
+    end_time   TEXT    NOT NULL,
+    label      TEXT,
+    enabled    INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS activities (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    activity_type     TEXT    NOT NULL,
+    title             TEXT    NOT NULL,
+    description       TEXT    NOT NULL,
+    plan_date         TEXT    NOT NULL,
+    scheduled_at      TEXT    NOT NULL,
+    duration_minutes  INTEGER NOT NULL DEFAULT 5,
+    status            TEXT    NOT NULL DEFAULT 'planned',
+    source            TEXT    NOT NULL DEFAULT 'system',
+    postponed_from_id INTEGER REFERENCES activities(id),
+    skipped_reason    TEXT,
+    completed_at      TEXT,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL,
+    action      TEXT    NOT NULL,
+    from_status TEXT,
+    to_status   TEXT,
+    note        TEXT,
+    created_at  TEXT    NOT NULL
+);
 """
 
 # 部分索引：phone 为 NULL 的账号（例如初始化脚本建的练习账号）不参与唯一性约束。
@@ -59,6 +113,15 @@ CREATE INDEX IF NOT EXISTS idx_codes_phone   ON verification_codes(phone, purpos
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone
     ON users(phone) WHERE phone IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_activities_user_day
+    ON activities(user_id, plan_date, status);
+CREATE INDEX IF NOT EXISTS idx_activities_postponed
+    ON activities(postponed_from_id);
+CREATE INDEX IF NOT EXISTS idx_events_user_time
+    ON activity_events(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_quiet_user
+    ON quiet_periods(user_id, enabled);
 """
 
 
