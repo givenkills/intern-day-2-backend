@@ -11,7 +11,8 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # 固定 +08:00 时区。不用 zoneinfo("Asia/Shanghai")，因为 Windows 裸机与精简容器
 # 可能没有系统时区数据库（zoneinfo 需要 tzdata），改用 timezone 常量最稳。
@@ -88,6 +89,45 @@ def plan_date_of_iso(iso_utc: str) -> str:
 def week_start(day: date) -> date:
     """返回 day 所在周的周一。"""
     return day - timedelta(days=day.weekday())
+
+
+_OFFSET_PATTERN = re.compile(r"^([+-])(\d{2}):(\d{2})$")
+
+
+def get_zone(name: str) -> tzinfo:
+    """取时区：优先 IANA 名称，也接受设备返回的固定偏移（如 +00:00）。"""
+    text = name.strip()
+    offset = _OFFSET_PATTERN.fullmatch(text)
+    if offset is not None:
+        sign, hours_text, minutes_text = offset.groups()
+        hours, minutes = int(hours_text), int(minutes_text)
+        if hours > 14 or minutes > 59 or (hours == 14 and minutes != 0):
+            raise ValueError(f"无效的时区偏移：{text}")
+        delta = timedelta(hours=hours, minutes=minutes)
+        return timezone(-delta if sign == "-" else delta, name=text)
+    try:
+        return ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"未知时区：{text}") from exc
+
+
+def parse_iso_datetime(value: str) -> datetime:
+    """解析库里的 ISO 时间串；无偏移的旧数据按 UTC 处理。"""
+    moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment
+
+
+def local_today_in(zone: tzinfo) -> date:
+    return datetime.now(zone).date()
+
+
+def week_utc_bounds(day: date, zone: tzinfo) -> tuple[datetime, datetime]:
+    """某时区自然周 [周一 00:00, 下周一 00:00) 对应的 UTC 区间。"""
+    start_local = datetime.combine(day, time.min, tzinfo=zone)
+    end_local = datetime.combine(day + timedelta(days=7), time.min, tzinfo=zone)
+    return start_local.astimezone(UTC), end_local.astimezone(UTC)
 
 
 def local_day_utc_bounds(day: date) -> tuple[str, str]:

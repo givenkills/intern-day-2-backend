@@ -13,6 +13,8 @@ dependencies = [
     "agent-framework-ag-ui>=1.7.0",
     "agent-framework-openai>=1.17.0",
     "arq==0.28.0",
+    # Windows 裸机/精简容器没有系统时区库，ZoneInfo 依赖这个数据包
+    "tzdata>=2025.1",
 ]
 
 [dependency-groups]

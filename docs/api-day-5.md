@@ -80,13 +80,67 @@
 
 请求体 `{ "reason": "下午开会" }`（可选）。置 `skipped`，当天不再重新生成同类型活动。
 
-### 8. 本周统计
+### 8. 周度复盘
 
-- `GET /activity/week`
+- `GET /activity/week?week_start=2026-10-26&timezone=Asia/Shanghai`
 
-返回 `{ week_start, week_end, planned, completed, postponed, skipped, days }`。
+参数：
 
-口径：周起点为周一（Asia/Shanghai）；`planned` 不含 `postponed` 记录（推迟派生记录计入，原记录只计一次推迟动作）。
+- `week_start`：周一，格式 `YYYY-MM-DD`；不传时返回当前周。
+- `timezone`：IANA 时区名（如 `Asia/Shanghai`）或固定偏移（如 `+08:00`），默认 `Asia/Shanghai`。周边界按该时区的周一 00:00 计算。
+
+返回：
+
+```json
+{
+  "week_start": "2026-10-26",
+  "week_end": "2026-11-01",
+  "timezone": "Asia/Shanghai",
+  "is_current": false,
+  "is_complete": true,
+  "planned": 3,
+  "completed": 1,
+  "skipped": 1,
+  "pending": 1,
+  "denominator": 3,
+  "completion_rate": 0.3333333333333333,
+  "postponed_activities": 1,
+  "postponed_ops": 2,
+  "generated_at": "2026-11-05T02:00:00+00:00",
+  "days": [
+    {
+      "date": "2026-10-26",
+      "planned": 1,
+      "completed": 1,
+      "skipped": 0,
+      "pending": 0,
+      "denominator": 1,
+      "completion_rate": 1.0,
+      "has_activities": true,
+      "activities": [
+        {
+          "id": 1,
+          "title": "远眺",
+          "scheduled_at": "2026-10-26T02:00:00+00:00",
+          "local_time": "10:00",
+          "status": "completed",
+          "source": "system",
+          "duration_minutes": 5,
+          "is_postponed": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+口径：
+
+- 周起点为周一；`planned` 只数最终记录，推迟链上的中间 `postponed` 记录不计。
+- `completed + skipped + pending = planned`；`planned = 0` 时 `completion_rate` 为 `null`，不显示 0%。
+- `postponed_activities` 按活动只数一次；`postponed_ops` 是推迟操作次数。两者是不同维度，不能相加。
+- 推迟只允许落在原活动当天；跨日返回 422。
+- 未来周、非周一、非法时区、格式错误均返回 422；未登录返回 401。
 
 ### 9. 生成安排建议（不落库）
 
