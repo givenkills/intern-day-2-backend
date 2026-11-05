@@ -37,7 +37,7 @@ All checks passed!
 15:08:00: schedule_fired date=2026-11-01 users=1 enqueued=1 duplicates=0 failed=0
 15:08:01: daily-report:1:2026-11-01:generate_daily_report(1, '2026-11-01')
 15:08:01: job_started user=1 date=2026-11-01 attempt=1 planned=5 completed=3 skipped=1 uncompleted=1 postponed_ops=1
-15:08:01: HTTP Request: POST http://192.168.0.12:8899/v1/chat/completions "HTTP/1.1 200 OK"
+15:08:01: HTTP Request: POST http://<模型服务地址>:8899/v1/chat/completions "HTTP/1.1 200 OK"
 15:08:01: job_succeeded user=1 date=2026-11-01 attempt=1 review_len=30
 ```
 
