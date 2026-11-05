@@ -229,21 +229,44 @@ class PostponeIn(BaseModel):
     scheduled_at: str | None = None
 
 
+class WeekActivityOut(BaseModel):
+    id: int
+    title: str
+    scheduled_at: str
+    local_time: str
+    status: str
+    source: str
+    duration_minutes: int
+    is_postponed: bool
+
+
 class WeekDayStat(BaseModel):
     date: str
     planned: int
     completed: int
-    postponed: int
     skipped: int
+    pending: int
+    denominator: int
+    completion_rate: float | None
+    has_activities: bool
+    activities: list[WeekActivityOut]
 
 
 class WeekOut(BaseModel):
     week_start: str
     week_end: str
+    timezone: str
+    is_current: bool
+    is_complete: bool
     planned: int
     completed: int
-    postponed: int
     skipped: int
+    pending: int
+    denominator: int
+    completion_rate: float | None
+    postponed_activities: int
+    postponed_ops: int
+    generated_at: str
     days: list[WeekDayStat]
 
 

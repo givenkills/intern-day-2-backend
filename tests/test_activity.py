@@ -327,9 +327,9 @@ def _insert_activity(user_id, plan_date, status):
         INSERT INTO activities (
             user_id, activity_type, title, description, plan_date, scheduled_at,
             duration_minutes, status, source, created_at, updated_at
-        ) VALUES (?, 'walk', '站起来走动', '测试数据', ?, '2026-10-30T10:00:00+08:00', 5, ?, 'system', ?, ?)
+        ) VALUES (?, 'walk', '站起来走动', '测试数据', ?, ?, 5, ?, 'system', ?, ?)
         """,
-        (user_id, plan_date, status, to_iso(utcnow()), to_iso(utcnow())),
+        (user_id, plan_date, f"{plan_date}T10:00:00+08:00", status, to_iso(utcnow()), to_iso(utcnow())),
     )
     conn.commit()
     conn.close()
@@ -359,9 +359,10 @@ def test_week_stats_counts(client, auth_headers):
     data = resp.json()
     assert data["completed"] == 2
     assert data["skipped"] == 1
-    assert data["postponed"] == 1
     # 计划数：completed(2) + skipped(1) + planned(1) = 4，postponed 原记录不计入
     assert data["planned"] == 4
+    assert data["pending"] == 1
+    assert data["completion_rate"] == 0.5
 
 
 def test_week_starts_on_monday(client, auth_headers):

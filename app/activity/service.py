@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta, tzinfo
 
 from fastapi import HTTPException, status
 
@@ -17,13 +17,17 @@ from . import kinds
 from .kinds import kind_cycle
 from .scheduler import MIN_GAP, Slot, available_slots, next_slot, plan_slots
 from .timeutil import (
+    TZ,
     format_time,
     local_date_to_utc_iso,
     local_today,
+    local_today_in,
     minutes_of_local_iso,
+    parse_iso_datetime,
     parse_time,
     utc_to_local_iso,
     week_start,
+    week_utc_bounds,
 )
 
 DEFAULT_SETTINGS = {
@@ -593,6 +597,10 @@ def postpone_activity(
     now = to_iso(utcnow())
 
     if scheduled_at is not None:
+        # 推迟只允许落在原活动当天；否则派生记录的 plan_date 会和实际时间脱节
+        target_local = parse_iso_datetime(scheduled_at).astimezone(TZ).date()
+        if target_local != date.fromisoformat(row["plan_date"]):
+            raise HTTPException(status_code=422, detail="推迟时间必须与原活动在同一天")
         # 用户指定时间：校验 + 冲突检查，通过则用这个时间
         minutes = _validate_slot_time(view, scheduled_at, ignore_activity_id=activity_id)
         _validate_no_time_conflict(
@@ -671,53 +679,123 @@ def _raise_invalid_transition(conn: sqlite3.Connection, activity_id: int, user_i
 # ---- 周统计 ----
 
 
-def week_stats(conn: sqlite3.Connection, user_id: int) -> dict:
-    today = local_today()
-    start = week_start(today)
-    days = [start + timedelta(days=i) for i in range(7)]
-    end = days[-1]
+def week_stats(
+    conn: sqlite3.Connection,
+    user_id: int,
+    week_start_date: date,
+    zone: tzinfo,
+    today: date | None = None,
+) -> dict:
+    """按用户时区统计一周复盘。
 
+    - 周边界用 UTC 时间比较，不依赖 plan_date，历史数据里带 +08:00 的时间串也能正确归属；
+    - planned 只数最终记录（中间 postponed 记录不计）；
+    - postponed_activities 按活动只数一次，postponed_ops 是操作次数，两者独立。
+    """
+    week_end_date = week_start_date + timedelta(days=6)
+    days = [week_start_date + timedelta(days=i) for i in range(7)]
+    start_utc, end_utc = week_utc_bounds(week_start_date, zone)
+
+    # plan_date 固定是 +08 的本地日；与用户时区最多相差一天，前后各多取两天足够覆盖。
     rows = conn.execute(
         """
-        SELECT plan_date, status FROM activities
+        SELECT id, title, scheduled_at, status, source, postponed_from_id, duration_minutes
+        FROM activities
         WHERE user_id = ? AND plan_date >= ? AND plan_date <= ?
         """,
-        (user_id, start.isoformat(), end.isoformat()),
+        (
+            user_id,
+            (week_start_date - timedelta(days=2)).isoformat(),
+            (week_end_date + timedelta(days=2)).isoformat(),
+        ),
     ).fetchall()
 
     day_map = {
         d.isoformat(): {
-            "date": d.isoformat(), "planned": 0,
-            "completed": 0, "postponed": 0, "skipped": 0,
+            "date": d.isoformat(),
+            "planned": 0,
+            "completed": 0,
+            "skipped": 0,
+            "pending": 0,
+            "denominator": 0,
+            "completion_rate": None,
+            "has_activities": False,
+            "activities": [],
         }
         for d in days
     }
-    planned = completed = postponed = skipped = 0
-    for r in rows:
-        key = r["plan_date"]
-        if key not in day_map:
-            continue
-        if r["status"] == "postponed":
-            # 被推迟的原记录不计入计划数，只计一次推迟动作
-            day_map[key]["postponed"] += 1
-            postponed += 1
-        else:
-            day_map[key]["planned"] += 1
-            planned += 1
-            if r["status"] == "completed":
-                day_map[key]["completed"] += 1
-                completed += 1
-            elif r["status"] == "skipped":
-                day_map[key]["skipped"] += 1
-                skipped += 1
 
+    planned = completed = skipped = postponed_activities = 0
+    for row in rows:
+        try:
+            moment = parse_iso_datetime(row["scheduled_at"])
+        except ValueError:
+            continue
+        if not (start_utc <= moment < end_utc):
+            continue
+        # 推迟链上的中间记录不算计划数，只有链条末端那条算一次
+        if row["status"] == "postponed":
+            continue
+
+        local_date = moment.astimezone(zone).date().isoformat()
+        day = day_map.get(local_date)
+        if day is None:
+            continue
+
+        day["planned"] += 1
+        planned += 1
+        if row["status"] == "completed":
+            day["completed"] += 1
+            completed += 1
+        elif row["status"] == "skipped":
+            day["skipped"] += 1
+            skipped += 1
+        if row["postponed_from_id"] is not None:
+            postponed_activities += 1
+
+        day["has_activities"] = True
+        day["activities"].append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "scheduled_at": moment.astimezone(UTC).isoformat(timespec="seconds"),
+                "local_time": moment.astimezone(zone).strftime("%H:%M"),
+                "status": row["status"],
+                "source": row["source"],
+                "duration_minutes": row["duration_minutes"],
+                "is_postponed": row["postponed_from_id"] is not None,
+            }
+        )
+
+    for day in day_map.values():
+        day["pending"] = max(0, day["planned"] - day["completed"] - day["skipped"])
+        day["denominator"] = day["planned"]
+        if day["planned"] > 0:
+            day["completion_rate"] = day["completed"] / day["planned"]
+        day["activities"].sort(key=lambda item: item["scheduled_at"])
+
+    postponed_ops = conn.execute(
+        "SELECT COUNT(*) AS total FROM activity_events "
+        "WHERE user_id = ? AND action = 'postpone' AND created_at >= ? AND created_at < ?",
+        (user_id, to_iso(start_utc), to_iso(end_utc)),
+    ).fetchone()["total"]
+
+    current_start = week_start(today or local_today_in(zone))
     return {
-        "week_start": start.isoformat(),
-        "week_end": end.isoformat(),
+        "week_start": week_start_date.isoformat(),
+        "week_end": week_end_date.isoformat(),
+        "timezone": getattr(zone, "key", str(zone)),
+        "is_current": week_start_date == current_start,
+        "is_complete": week_start_date < current_start,
         "planned": planned,
         "completed": completed,
-        "postponed": postponed,
         "skipped": skipped,
+        "pending": max(0, planned - completed - skipped),
+        "denominator": planned,
+        "completion_rate": (completed / planned) if planned else None,
+        "postponed_activities": postponed_activities,
+        "postponed_ops": postponed_ops,
+        "generated_at": to_iso(utcnow()),
         "days": [day_map[d.isoformat()] for d in days],
     }
 

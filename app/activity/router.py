@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..deps import CurrentUser, DbConn
 from . import service
@@ -24,6 +25,8 @@ from .schemas import (
     TodayOut,
     WeekOut,
 )
+from .timeutil import get_zone, local_today_in
+from .timeutil import week_start as start_of_week
 
 router = APIRouter(prefix="/activity", tags=["活动助手"])
 
@@ -125,9 +128,38 @@ def postpone(
     return service.postpone_activity(conn, activity_id, current_user["id"], scheduled_at)
 
 
-@router.get("/week", response_model=WeekOut, summary="本周统计")
-def week(current_user: CurrentUser, conn: DbConn) -> dict:
-    return service.week_stats(conn, current_user["id"])
+@router.get("/week", response_model=WeekOut, summary="周度复盘统计")
+def week(
+    current_user: CurrentUser,
+    conn: DbConn,
+    week_start: str | None = Query(
+        default=None,
+        description="周一的日期 YYYY-MM-DD；不传时返回当前周",
+    ),
+    timezone: str = Query(default="Asia/Shanghai", description="IANA 时区名"),
+) -> dict:
+    try:
+        zone = get_zone(timezone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    current_start = start_of_week(local_today_in(zone))
+    if week_start is None:
+        target = current_start
+    else:
+        try:
+            target = date.fromisoformat(week_start)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="week_start 格式应为 YYYY-MM-DD，例如 2026-10-26",
+            ) from exc
+        if target.weekday() != 0:
+            raise HTTPException(status_code=422, detail="week_start 必须是周一")
+        if target > current_start:
+            raise HTTPException(status_code=422, detail="不能查看未来周")
+
+    return service.week_stats(conn, current_user["id"], target, zone)
 
 
 @router.post("/agent/suggest", response_model=AgentSuggestOut, summary="生成安排建议（不落库）")
