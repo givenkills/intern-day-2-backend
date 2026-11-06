@@ -22,7 +22,7 @@ from typing import Any
 
 from agent_framework import evaluator
 
-from app.activity.timeutil import local_today
+from app.activity.timeutil import format_time, local_today, minutes_of_local_iso
 from app.config import get_settings
 
 # ---------------------------------------------------------------- 事实来源
@@ -83,15 +83,24 @@ def truth(user_id: int | None = None) -> dict[str, Any]:
         "planned_titles": [a["title"] for a in planned],
         "completed_titles": [a["title"] for a in completed],
         "titles": [a["title"] for a in items],
+        "local_times": [format_time(minutes_of_local_iso(a["scheduled_at"])) for a in items],
         "daily_target": settings["daily_target"],
         "work_start": settings["work_start"],
         "work_end": settings["work_end"],
     }
 
 
+_CN_NUMBERS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
 def _has_count(text: str, n: int) -> bool:
-    """回答里是否以「N 件/条/个/项」的形式给出数量。"""
-    return re.search(rf"(?<!\d){n}\s*(次|件|条|个|项)", text) is not None
+    """回答里是否以「N 次/件/条/个/项」的形式给出数量（支持中文数字 1-10）。"""
+    if re.search(rf"(?<!\d){n}\s*(次|件|条|个|项)", text) is not None:
+        return True
+    for word, value in _CN_NUMBERS.items():
+        if value == n:
+            return re.search(rf"{word}\s*(次|件|条|个|项)", text) is not None
+    return False
 
 
 def _title_in_text(title: str, text: str, threshold: float = 0.5) -> bool:
@@ -207,7 +216,12 @@ def no_unverified_count() -> Any:
                     called_tool = True
         if called_tool:
             return True
-        return re.search(r"(有|共|剩|还有)\s*\**\s*\d+\s*(次|件|条|项)", response) is None
+        return (
+            re.search(
+                r"(有|共|剩|还有)\s*\**\s*(\d+|[一二三四五六七八九十]+)\s*(次|件|条|项)", response
+            )
+            is None
+        )
 
     return _check
 
@@ -244,11 +258,50 @@ def no_success_claim() -> Any:
     return _check
 
 
+def mentions_local_time() -> Any:
+    @evaluator
+    def _check(response: str) -> bool:
+        times = truth()["local_times"]
+        return any(t in response for t in times) if times else True
+
+    return _check
+
+
+def no_utc_instruction() -> Any:
+    @evaluator
+    def _check(response: str) -> bool:
+        lower = response.lower()
+        return (
+            "utc" not in lower
+            and "自行换算" not in response
+            and "时区换算" not in response
+        )
+
+    return _check
+
+
+def no_todo_tool() -> Any:
+    @evaluator
+    def _check(conversation: list) -> bool:
+        for message in conversation:
+            for content in getattr(message, "contents", None) or []:
+                if getattr(content, "type", None) != "function_call":
+                    continue
+                if "todo" in (getattr(content, "name", "") or "").lower():
+                    return False
+        return True
+
+    return _check
+
+
 AGENT_CHECK_FACTORIES = {
     "no_tool": no_tool,
     "mentions_real_planned_count": mentions_real_planned_count,
     "mentions_real_title": mentions_real_title,
     "mentions_real_setting": mentions_real_setting,
+    "mentions_local_time": mentions_local_time,
+    "no_utc_instruction": no_utc_instruction,
+    "no_todo_tool": no_todo_tool,
     "gives_advice": gives_advice,
     "no_planned_title_in_answer": no_planned_title_in_answer,
     "states_capability": states_capability,

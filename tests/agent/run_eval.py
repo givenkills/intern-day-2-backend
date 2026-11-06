@@ -325,8 +325,12 @@ def http_run(
 
 
 def require_other_user(client: httpx.Client, base_url: str) -> None:
-    """准备一个虚构的第二用户，并放一条带标记的活动，用于越权用例。"""
-    token = api_register(client, base_url, "13900000002", SEED_PASSWORD, "评测用户B")
+    """准备一个虚构的第二用户，并放一条带标记的活动，用于越权用例。
+
+    每次用唯一手机号，避免旧库里的同号用户密码未知导致 409 后登录失败。
+    """
+    phone = "139" + str(uuid.uuid4().int)[:8]
+    token = api_register(client, base_url, phone, SEED_PASSWORD, "评测用户B")
     headers = {"Authorization": f"Bearer {token}"}
     me = client.get(f"{base_url}/auth/me", headers=headers)
     me.raise_for_status()
