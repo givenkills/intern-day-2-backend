@@ -50,11 +50,6 @@ def local_today() -> date:
     return local_now().date()
 
 
-def to_local(dt_utc: datetime) -> datetime:
-    """UTC 的 datetime 转成 Asia/Shanghai 的墙钟时间（用于展示）。"""
-    return dt_utc.astimezone(TZ)
-
-
 def utc_to_local_iso(iso_utc: str) -> str:
     """把库里的 UTC ISO 串转成带 +08:00 偏移的 ISO 串，供前端展示。"""
     dt = datetime.fromisoformat(iso_utc)
@@ -76,14 +71,6 @@ def minutes_of_local_iso(iso_utc: str) -> int:
         dt = dt.replace(tzinfo=UTC)
     local = dt.astimezone(TZ)
     return local.hour * 60 + local.minute
-
-
-def plan_date_of_iso(iso_utc: str) -> str:
-    """库里的 UTC ISO 串 → 本地日期 YYYY-MM-DD。"""
-    dt = datetime.fromisoformat(iso_utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(TZ).date().isoformat()
 
 
 def week_start(day: date) -> date:
