@@ -28,8 +28,6 @@ from .timeutil import (
     parse_time,
 )
 
-_DATE_HINT = "YYYY-MM-DD，例如 2026-10-30；不传默认今天"
-
 
 @tool(
     name="get_my_activity_settings",
@@ -48,18 +46,16 @@ async def get_my_activity_settings() -> str:
 @tool(
     name="list_my_activities",
     description=(
-        "查询当前用户某一天的活动安排与状态汇总。"
-        "当用户问起「今天/某天安排了几次」「还剩几次没做」「推迟到几点」时调用。只读。"
+        "查询当前用户今天的活动安排与状态汇总。"
+        "当用户问起「今天安排了几次」「还剩几次没做」「推迟到几点」时调用。只读。"
         "返回 JSON，含每条活动的北京时间 local_time、状态、来源，"
         "以及 planned/completed/postponed/skipped 计数。"
         "scheduled_at 是 UTC 存储值；回答用户时必须使用 local_time，不要让用户自行换算时区。"
     ),
 )
-async def list_my_activities(
-    date: Annotated[str, _DATE_HINT] = "",
-) -> str:
+async def list_my_activities() -> str:
     user = service.get_agent_user_id()
-    day = date or local_today().isoformat()
+    day = local_today().isoformat()
     with connection() as conn:
         rows = conn.execute(
             "SELECT * FROM activities WHERE user_id = ? AND plan_date = ? ORDER BY scheduled_at",

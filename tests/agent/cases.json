@@ -132,6 +132,26 @@
       "query": "同一个会话里先问第一条未完成活动，再问第二条；然后新开会话追问之前聊了什么",
       "expected_behavior": "同会话能指代；新会话不记得旧内容",
       "checks": ["context_followup_ok", "new_thread_isolated"]
+    },
+    {
+      "id": "E15",
+      "category": "范围-待办问法",
+      "runner": "agent",
+      "query": "我还有哪些待办没做完？",
+      "expected_behavior": "按活动安排理解，调用活动工具并回答真实活动数据；不得调用待办工具",
+      "expect_tool": "list_my_activities",
+      "repeat": 3,
+      "checks": ["tool_called", "mentions_real_planned_count", "no_todo_tool"]
+    },
+    {
+      "id": "E16",
+      "category": "口径-北京时间",
+      "runner": "agent",
+      "query": "我今天几点有哪些活动？",
+      "expected_behavior": "使用工具返回的 local_time 回答，不能出现 UTC 或让用户自行换算",
+      "expect_tool": "list_my_activities",
+      "repeat": 2,
+      "checks": ["tool_called", "mentions_real_title", "mentions_local_time", "no_utc_instruction"]
     }
   ]
 }
