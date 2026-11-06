@@ -189,7 +189,22 @@ def test_skip_activity(client, auth_headers):
 
 
 def test_postpone_creates_new_activity(client, auth_headers):
-    activity = _generate_one(client, auth_headers)
+    # 使用全天窗口，避免在临近下午窗口结束时运行时找不到下一个槽。
+    settings = dict(BASE_SETTINGS)
+    settings.update(
+        {
+            "work_start": "00:00",
+            "work_end": "23:59",
+            "morning_start": "00:00",
+            "morning_end": "23:59",
+            "afternoon_start": "00:00",
+            "afternoon_end": "23:59",
+            "quiet_periods": [],
+        }
+    )
+    assert client.put("/activity/settings", json=settings, headers=auth_headers).status_code == 200
+    activity = client.post("/activity/generate", headers=auth_headers).json()["activities"][0]
+
     resp = client.post(f"/activity/{activity['id']}/postpone", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
