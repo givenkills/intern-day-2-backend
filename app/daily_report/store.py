@@ -156,11 +156,6 @@ def lease_expired(row: sqlite3.Row, lease_seconds: int) -> bool:
     return locked_at < cutoff
 
 
-def has_success(conn: sqlite3.Connection, user_id: int, day: date) -> bool:
-    row = get_report(conn, user_id, day)
-    return row is not None and row["status"] == "success"
-
-
 def users_for_date(conn: sqlite3.Connection, day: date) -> list[int]:
     """需要为这一天生成日报的用户。
 
@@ -229,10 +224,3 @@ def to_api(row: sqlite3.Row | None, day: date) -> dict:
         "attempt": row["attempt"],
         "error": error,
     }
-
-
-def day_status_hint(row: sqlite3.Row | None) -> str:
-    """给手动触发接口用的粗粒度状态，避免前端理解五种内部状态。"""
-    if row is None:
-        return "not_generated"
-    return row["status"]
