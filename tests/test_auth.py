@@ -90,7 +90,7 @@ def test_logout_invalidates_old_token(client):
 
     # 同一个令牌退出后必须失效
     assert client.get("/auth/me", headers=headers).status_code == 401
-    assert client.get("/todos", headers=headers).status_code == 401
+    assert client.get("/activity/today", headers=headers).status_code == 401
 
 
 def test_expired_token_is_rejected(client):

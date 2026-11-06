@@ -1,7 +1,7 @@
 """FastAPI 应用入口。
 
 统一约定：
-- 所有业务接口挂在 /auth 与 /todos 下，交互文档在 /docs。
+- 所有业务接口挂在 /auth、/activity 与 /reports 下，交互文档在 /docs。
 - 参数校验失败返回 422，统一的中文提示结构，前端可以直接展示。
 - 跨域来源由 CORS_ORIGINS 控制，浏览器直接访问宿主机 8000 端口。
 """
@@ -22,7 +22,7 @@ from .config import get_settings
 from .daily_report.queue import close_pool
 from .daily_report.router import router as reports_router
 from .db import init_db
-from .routers import auth, todos
+from .routers import auth
 from .schemas import HealthOut
 from .security import to_iso, utcnow
 from .seed import seed_demo_user
@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="实习生第二天练习：账号密码登录 + 待办清单。登录凭证为后端签发的不透明令牌。",
+    description="久坐活动助手：账号密码登录 + 活动安排、周统计与每日总结。登录凭证为后端签发的不透明令牌。",
     lifespan=lifespan,
 )
 
@@ -88,7 +88,6 @@ def health() -> HealthOut:
 
 
 app.include_router(auth.router)
-app.include_router(todos.router)
 app.include_router(activity_router)
 app.include_router(reports_router)
 
@@ -97,4 +96,4 @@ app.include_router(reports_router)
 if settings.agent_ready:
     register_agent_endpoint(app)
 else:
-    logger.warning("未配置 QWEN_API_KEY，/agent 入口未注册；登录与待办功能不受影响")
+    logger.warning("未配置 QWEN_API_KEY，/agent 入口未注册；登录与活动安排功能不受影响")

@@ -36,7 +36,7 @@ async def resolve_authorization_scope(
 ) -> str:
     """校验登录凭证，返回本次请求的用户作用域。
 
-    和 /todos 用的是同一个 authenticate_token，避免两套鉴权规则慢慢跑偏。
+    和 /auth、/activity 用的是同一个 authenticate_token，避免两套鉴权规则慢慢跑偏。
     """
     if credentials is None or not credentials.credentials:
         raise unauthorized("未登录或缺少登录凭证")

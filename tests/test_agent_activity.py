@@ -1,9 +1,14 @@
-"""Agent 建议与确认接口测试。
+"""Agent 建议、确认接口与只读工具测试。
 
 对应用例：G02（from_time 排除会议时段）、G03（确认时被篡改被拒）。
 """
 
+import asyncio
+import json
+
+from app.activity.agent_tools import list_my_activities
 from app.activity.timeutil import local_today, utc_to_local_iso
+from app.agent.context import set_agent_user
 from tests.test_activity import BASE_SETTINGS, _save_default_settings
 
 
@@ -143,3 +148,22 @@ def test_confirm_rejects_empty_slots(client, auth_headers):
 def test_confirm_requires_login(client):
     resp = client.post("/activity/agent/confirm", json={"slots": []})
     assert resp.status_code == 401
+
+
+def test_list_my_activities_returns_beijing_local_time(client, auth_headers):
+    """工具必须给出北京时间 local_time，避免模型把 UTC 时间直接回答给用户。"""
+    _save_default_settings(client, auth_headers)
+    generated = client.post("/activity/generate", headers=auth_headers).json()
+    assert generated["activities"], "生成后应至少有一条活动"
+
+    set_agent_user(client.get("/auth/me", headers=auth_headers).json())
+    data = json.loads(asyncio.run(list_my_activities()))
+
+    assert data["timezone"] == "Asia/Shanghai"
+    assert data["date"] == local_today().isoformat()
+
+    returned = {item["id"]: item for item in data["activities"]}
+    for activity in generated["activities"]:
+        item = returned[activity["id"]]
+        local = utc_to_local_iso(item["scheduled_at"])
+        assert item["local_time"] == local[11:16]

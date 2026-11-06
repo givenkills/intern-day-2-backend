@@ -4,6 +4,7 @@ import sqlite3
 import uuid
 from datetime import timedelta
 
+from app.activity.timeutil import local_today
 from app.config import get_settings
 from app.security import to_iso, utcnow
 
@@ -202,33 +203,49 @@ def test_login_with_phone_after_register(client):
 # ---------- 多账户数据隔离 ----------
 
 
-def test_two_accounts_do_not_see_each_other_todos(client):
+def test_two_accounts_do_not_see_each_other_activities(client):
     phone_a, phone_b = unique_phone(), unique_phone()
     headers_a = auth_of(register(client, phone_a, name="甲"))
     headers_b = auth_of(register(client, phone_b, name="乙"))
 
-    # 新注册的账户看到的应该是空列表
-    assert client.get("/todos", headers=headers_a).json() == []
-    assert client.get("/todos", headers=headers_b).json() == []
+    # 新注册的账户今日都没有活动
+    today_a = client.get("/activity/today", headers=headers_a)
+    today_b = client.get("/activity/today", headers=headers_b)
+    assert today_a.status_code == 200 and today_a.json()["summary"]["total"] == 0
+    assert today_b.status_code == 200 and today_b.json()["summary"]["total"] == 0
 
-    created = client.post("/todos", json={"title": "甲的秘密待办"}, headers=headers_a)
-    assert created.status_code == 201
-    todo_id = created.json()["id"]
+    # 直接为甲写入一条当天活动，验证乙看不到、也操作不了
+    me_a = client.get("/auth/me", headers=headers_a).json()
+    today = local_today().isoformat()
+    now = to_iso(utcnow())
+    conn = sqlite3.connect(get_settings().database_path)
+    cursor = conn.execute(
+        """
+        INSERT INTO activities (
+            user_id, activity_type, title, description, plan_date, scheduled_at,
+            duration_minutes, status, source, created_at, updated_at
+        ) VALUES (?, 'walk', '甲的秘密活动', '仅用于隔离测试', ?, ?, 5, 'planned', 'system', ?, ?)
+        """,
+        (me_a["id"], today, f"{today}T10:00:00+08:00", now, now),
+    )
+    activity_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    assert activity_id is not None
 
-    # 乙看不到甲的待办
-    assert client.get("/todos", headers=headers_b).json() == []
-    # 乙也改不动、删不掉
-    assert client.patch(f"/todos/{todo_id}", json={"done": True}, headers=headers_b).status_code == 404
-    assert client.delete(f"/todos/{todo_id}", headers=headers_b).status_code == 404
+    # 乙的今日仍为空，且不能操作甲的活动
+    assert client.get("/activity/today", headers=headers_b).json()["summary"]["total"] == 0
+    assert client.post(f"/activity/{activity_id}/complete", headers=headers_b).status_code == 404
+    assert (
+        client.post(f"/activity/{activity_id}/skip", json={"reason": "测试"}, headers=headers_b).status_code
+        == 404
+    )
 
-    # 甲自己的数据没有被影响
-    mine = client.get("/todos", headers=headers_a).json()
-    assert len(mine) == 1 and mine[0]["title"] == "甲的秘密待办" and mine[0]["done"] is False
-
-    # 乙建自己的待办，两边互不干扰
-    client.post("/todos", json={"title": "乙的待办"}, headers=headers_b)
-    assert len(client.get("/todos", headers=headers_a).json()) == 1
-    assert len(client.get("/todos", headers=headers_b).json()) == 1
+    # 甲能看到自己的活动，数据没有被乙影响
+    mine = client.get("/activity/today", headers=headers_a).json()
+    assert mine["summary"]["total"] == 1
+    assert mine["activities"][0]["title"] == "甲的秘密活动"
+    assert mine["activities"][0]["status"] == "planned"
 
 
 def test_same_display_name_can_be_registered_twice(client):

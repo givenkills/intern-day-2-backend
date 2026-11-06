@@ -53,7 +53,7 @@ def authenticate_token(token: str, conn: sqlite3.Connection) -> dict:
     """令牌换用户的最小实现。
 
     放在这里而不是只写在依赖里，是因为 AG-UI 的鉴权入口是普通函数调用，
-    需要和 /todos 走同一套校验逻辑，避免两处规则漂移。
+    需要和 /auth、/activity 走同一套校验逻辑，避免两处规则漂移。
     """
     fingerprint = token_fingerprint(token)
     row = conn.execute(
