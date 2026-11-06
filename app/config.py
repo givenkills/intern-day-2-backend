@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    app_name: str = "Intern Day 2 Todo API"
+    app_name: str = "久坐活动助手 API"
     app_version: str = "1.0.0"
 
     # 数据文件位置。容器中通过 volume 挂载到 /data，避免容器重建后数据丢失。
@@ -30,7 +30,6 @@ class Settings(BaseSettings):
     seed_username: str = "intern"
     seed_password: str = "intern123456"
     seed_display_name: str = "练习同学"
-    seed_sample_todos: bool = True
 
     # ---- 手机验证码（练习用模拟通道，不接真实短信）----
     # 验证码的 HMAC 密钥，正式环境必须换成随机值并从环境变量注入。
@@ -52,8 +51,6 @@ class Settings(BaseSettings):
     # DashScope 兼容模式地址；换成其他 OpenAI 兼容服务时只改这里。
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_model: str = "qwen-plus"
-    # 只读工具一次最多返回多少条待办，避免把整库塞进上下文。
-    agent_tool_todo_limit: int = 20
 
     # ---- 每日总结：Redis 队列 + ARQ 后台任务 ----
     # 队列地址。容器内必须用 Compose 服务名 redis，不能用 localhost（那是容器自己）。

@@ -13,12 +13,6 @@ from .config import get_settings
 from .db import connection, init_db
 from .security import hash_password, to_iso, utcnow
 
-_SAMPLE_TODOS = (
-    "看完 FastAPI 的 /docs 页面，确认每个接口的请求体",
-    "验证不登录时直接访问功能页会被弹回登录页",
-    "退出登录后，用旧令牌再请求一次 /todos 应该拿到 401",
-)
-
 
 def seed_demo_user() -> bool:
     """用户表为空时创建练习账号，返回是否真的创建了。"""
@@ -30,7 +24,7 @@ def seed_demo_user() -> bool:
             return False
 
         now = to_iso(utcnow())
-        cursor = conn.execute(
+        conn.execute(
             """
             INSERT INTO users (username, display_name, password_hash, created_at)
             VALUES (?, ?, ?, ?)
@@ -42,17 +36,6 @@ def seed_demo_user() -> bool:
                 now,
             ),
         )
-        user_id = cursor.lastrowid
-
-        if settings.seed_sample_todos:
-            conn.executemany(
-                """
-                INSERT INTO todos (user_id, title, done, created_at, updated_at)
-                VALUES (?, ?, 0, ?, ?)
-                """,
-                [(user_id, title, now, now) for title in _SAMPLE_TODOS],
-            )
-
     return True
 
 

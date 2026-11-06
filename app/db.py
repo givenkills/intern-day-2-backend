@@ -36,15 +36,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at        TEXT    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS todos (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    title      TEXT    NOT NULL,
-    done       INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT    NOT NULL,
-    updated_at TEXT    NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS verification_codes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     phone       TEXT    NOT NULL,
@@ -154,7 +145,6 @@ CREATE TABLE IF NOT EXISTS daily_reports (
 # 部分索引：phone 为 NULL 的账号（例如初始化脚本建的练习账号）不参与唯一性约束。
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_todos_user    ON todos(user_id);
 CREATE INDEX IF NOT EXISTS idx_codes_phone   ON verification_codes(phone, purpose);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone

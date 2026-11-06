@@ -93,41 +93,6 @@ class UserOut(BaseModel):
     created_at: str
 
 
-class TodoCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=120, description="待办内容")
-
-    @field_validator("title")
-    @classmethod
-    def _strip_title(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("待办内容不能为空")
-        return value
-
-
-class TodoUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=120)
-    done: bool | None = None
-
-    @field_validator("title")
-    @classmethod
-    def _strip_title(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        if not value:
-            raise ValueError("待办内容不能为空")
-        return value
-
-
-class TodoOut(BaseModel):
-    id: int
-    title: str
-    done: bool
-    created_at: str
-    updated_at: str
-
-
 class HealthOut(BaseModel):
     status: str
     app: str

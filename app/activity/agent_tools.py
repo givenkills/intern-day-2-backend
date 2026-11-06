@@ -20,7 +20,13 @@ from ..db import connection
 from . import service
 from .kinds import kind_cycle
 from .scheduler import MIN_GAP, Slot, plan_slots
-from .timeutil import format_time, local_date_to_utc_iso, local_today, parse_time
+from .timeutil import (
+    format_time,
+    local_date_to_utc_iso,
+    local_today,
+    minutes_of_local_iso,
+    parse_time,
+)
 
 _DATE_HINT = "YYYY-MM-DD，例如 2026-10-30；不传默认今天"
 
@@ -44,7 +50,9 @@ async def get_my_activity_settings() -> str:
     description=(
         "查询当前用户某一天的活动安排与状态汇总。"
         "当用户问起「今天/某天安排了几次」「还剩几次没做」「推迟到几点」时调用。只读。"
-        "返回 JSON，含每条活动的时间、状态、来源，以及 planned/completed/postponed/skipped 计数。"
+        "返回 JSON，含每条活动的北京时间 local_time、状态、来源，"
+        "以及 planned/completed/postponed/skipped 计数。"
+        "scheduled_at 是 UTC 存储值；回答用户时必须使用 local_time，不要让用户自行换算时区。"
     ),
 )
 async def list_my_activities(
@@ -59,6 +67,7 @@ async def list_my_activities(
         ).fetchall()
     payload = {
         "date": day,
+        "timezone": "Asia/Shanghai",
         "summary": {
             "total": len(rows),
             "planned": sum(1 for r in rows if r["status"] == "planned"),
@@ -70,6 +79,7 @@ async def list_my_activities(
             {
                 "id": r["id"],
                 "title": r["title"],
+                "local_time": format_time(minutes_of_local_iso(r["scheduled_at"])),
                 "scheduled_at": r["scheduled_at"],
                 "status": r["status"],
                 "source": r["source"],
