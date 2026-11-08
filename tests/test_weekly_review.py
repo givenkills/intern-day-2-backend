@@ -321,7 +321,12 @@ def test_week_review_isolates_users(client, auth_headers):
         {"week_start": "not-a-date"},
     ],
 )
-def test_week_review_rejects_invalid_queries(client, auth_headers, params):
+def test_week_review_rejects_invalid_queries(client, auth_headers, params, monkeypatch):
+    from app.activity import router as activity_router
+
+    # 固定“今天”为 2026-11-01，避免硬编码的 2026-11-09 在跨天后变成当前周
+    monkeypatch.setattr(activity_router, "local_today_in", lambda zone: date(2026, 11, 1))
+
     resp = _get_week(client, auth_headers, **params)
     assert resp.status_code == 422
     assert resp.json()["detail"]
