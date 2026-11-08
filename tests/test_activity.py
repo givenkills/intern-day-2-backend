@@ -163,6 +163,44 @@ def test_generate_avoids_quiet_hours(client, auth_headers):
         assert not (12 <= hour < 14), f"{a['scheduled_at']} 落在午休时段"
 
 
+def test_today_sorted_by_actual_time_with_mixed_offsets(client, auth_headers):
+    """库里混用 +08:00 与 +00:00 时，今日列表仍按真实时刻从早到晚排。"""
+    from app.activity.timeutil import local_today
+    from app.db import connection
+
+    with connection() as conn:
+        user_id = conn.execute("SELECT id FROM users WHERE username = 'intern'").fetchone()["id"]
+
+    today = local_today().isoformat()
+    rows = {
+        "evening": f"{today}T09:00:00+00:00",  # 北京时间 17:00
+        "early": f"{today}T15:30:00+08:00",  # 北京时间 15:30
+        "middle": f"{today}T16:35:00+08:00",  # 北京时间 16:35
+    }
+    ids: dict[str, int] = {}
+    conn = sqlite3.connect(get_settings().database_path)
+    for label, scheduled_at in rows.items():
+        cursor = conn.execute(
+            """
+            INSERT INTO activities (
+                user_id, activity_type, title, description, plan_date, scheduled_at,
+                duration_minutes, status, source, created_at, updated_at
+            ) VALUES (?, 'walk', ?, '测试数据', ?, ?, 5, 'planned', 'system', ?, ?)
+            """,
+            (user_id, label, today, scheduled_at, to_iso(utcnow()), to_iso(utcnow())),
+        )
+        ids[label] = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    data = client.get("/activity/today", headers=auth_headers).json()
+    assert [item["id"] for item in data["activities"]] == [
+        ids["early"],
+        ids["middle"],
+        ids["evening"],
+    ]
+
+
 # ---- S 组：状态流转 ----
 
 
