@@ -312,8 +312,15 @@ def test_postpone_to_conflicting_time_rejected(client, auth_headers):
     assert resp.status_code == 422
 
 
-def test_postpone_options_returns_available_times(client, auth_headers):
+def test_postpone_options_returns_available_times(client, auth_headers, monkeypatch):
     """postpone-options 返回当天剩余可推迟的时间点，且不含免打扰时段。"""
+    from datetime import UTC, datetime
+
+    from app.activity import service
+
+    # 固定“现在”为北京时间 09:00，避免测试在傍晚运行时当天已无未来时段
+    monkeypatch.setattr(service, "utcnow", lambda: datetime(2026, 1, 1, 1, 0, tzinfo=UTC))
+
     activity = _generate_one(client, auth_headers)
     resp = client.get(f"/activity/{activity['id']}/postpone-options", headers=auth_headers)
     assert resp.status_code == 200
@@ -330,6 +337,44 @@ def test_postpone_options_returns_available_times(client, auth_headers):
         assert hh * 60 + mm > original_minutes, f"{t} 应在原时间之后"
         # 不在午休 12:00-14:00 内
         assert not (12 * 60 <= hh * 60 + mm < 14 * 60), f"{t} 不应落在午休时段"
+
+
+def test_postpone_options_exclude_past_times(client, auth_headers, monkeypatch):
+    """已经过去的时段不能作为推迟目标。"""
+    from datetime import UTC, datetime
+
+    from app.activity import service
+    from app.activity.timeutil import local_today
+    from app.db import connection
+
+    _save_default_settings(client, auth_headers)
+    with connection() as conn:
+        user_id = conn.execute("SELECT id FROM users WHERE username = 'intern'").fetchone()["id"]
+
+    today = local_today().isoformat()
+    conn = sqlite3.connect(get_settings().database_path)
+    cursor = conn.execute(
+        """
+        INSERT INTO activities (
+            user_id, activity_type, title, description, plan_date, scheduled_at,
+            duration_minutes, status, source, created_at, updated_at
+        ) VALUES (?, 'water', '接水或去洗手间', '测试数据', ?, ?, 5, 'planned', 'system', ?, ?)
+        """,
+        (user_id, today, f"{today}T09:30:00+08:00", to_iso(utcnow()), to_iso(utcnow())),
+    )
+    conn.commit()
+    conn.close()
+    activity_id = cursor.lastrowid
+
+    # 固定“现在”为北京时间 16:00
+    monkeypatch.setattr(service, "utcnow", lambda: datetime(2026, 1, 1, 8, 0, tzinfo=UTC))
+
+    resp = client.get(f"/activity/{activity_id}/postpone-options", headers=auth_headers)
+    assert resp.status_code == 200
+    times = resp.json()["times"]
+    assert times, "16:00 之后仍应有候选时间"
+    assert all(t > "16:00" for t in times), times
+    assert "10:05" not in times
 
 
 # ---- W 组：周统计 ----

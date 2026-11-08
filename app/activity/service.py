@@ -535,7 +535,8 @@ def postpone_options(conn: sqlite3.Connection, activity_id: int, user_id: int) -
     """返回当天剩余可推迟的候选时间点（30 分钟粒度，避开免打扰与已占用）。
 
     前端把这些时间点渲染成可点击按钮，代替难以操作的 select/time 控件。
-    时间点从「原活动时间 + min_gap」之后开始，直到工作时段结束。
+    时间点从「原活动时间 + min_gap」和当前时间中较晚的一个开始，直到工作时段结束；
+    已经过去的时段不能作为推迟目标。
     """
     row = _load_activity(conn, activity_id, user_id)
     view = _settings_view(conn, user_id)
@@ -555,8 +556,9 @@ def postpone_options(conn: sqlite3.Connection, activity_id: int, user_id: int) -
         MIN_GAP,
     )
 
-    # 只保留原活动时间之后的候选点，按 30 分钟粒度采样
-    after = own_start + MIN_GAP
+    # 只保留原活动时间之后、且不早于当前时间的候选点，按 30 分钟粒度采样
+    now_minutes = minutes_of_local_iso(to_iso(utcnow()))
+    after = max(own_start + MIN_GAP, now_minutes + MIN_GAP)
     points: list[str] = []
     for slot in free:
         cursor = max(slot.start + MIN_GAP, after)
