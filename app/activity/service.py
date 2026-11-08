@@ -404,9 +404,11 @@ def schedule_template(
 def list_today(conn: sqlite3.Connection, user_id: int) -> dict:
     day = local_today().isoformat()
     rows = conn.execute(
-        "SELECT * FROM activities WHERE user_id = ? AND plan_date = ? ORDER BY scheduled_at",
+        "SELECT * FROM activities WHERE user_id = ? AND plan_date = ?",
         (user_id, day),
     ).fetchall()
+    # 库里同时存在 +08:00 与 +00:00 的时间串，按字符串排序会错位，必须按真实时刻排
+    rows = sorted(rows, key=lambda r: parse_iso_datetime(r["scheduled_at"]))
     summary = _summary_of(rows)
     return {"date": day, "summary": summary, "activities": [_activity_out(r) for r in rows]}
 
@@ -433,7 +435,10 @@ def generate_today(conn: sqlite3.Connection, user_id: int) -> dict:
             "requested": len(existing),
             "planned": len([r for r in existing if r["status"] == "planned"]),
             "notice": "今天已生成过安排，如需调整可对单条活动推迟或跳过",
-            "activities": [_activity_out(r) for r in existing],
+            "activities": [
+                _activity_out(r)
+                for r in sorted(existing, key=lambda row: parse_iso_datetime(row["scheduled_at"]))
+            ],
         }
 
     # 当天已跳过的类型不再安排
@@ -774,7 +779,7 @@ def week_stats(
         day["denominator"] = day["planned"]
         if day["planned"] > 0:
             day["completion_rate"] = day["completed"] / day["planned"]
-        day["activities"].sort(key=lambda item: item["scheduled_at"])
+        day["activities"].sort(key=lambda item: parse_iso_datetime(item["scheduled_at"]))
 
     postponed_ops = conn.execute(
         "SELECT COUNT(*) AS total FROM activity_events "

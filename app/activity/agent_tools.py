@@ -25,6 +25,7 @@ from .timeutil import (
     local_date_to_utc_iso,
     local_today,
     minutes_of_local_iso,
+    parse_iso_datetime,
     parse_time,
 )
 
@@ -58,9 +59,10 @@ async def list_my_activities() -> str:
     day = local_today().isoformat()
     with connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM activities WHERE user_id = ? AND plan_date = ? ORDER BY scheduled_at",
+            "SELECT * FROM activities WHERE user_id = ? AND plan_date = ?",
             (user, day),
         ).fetchall()
+    rows = sorted(rows, key=lambda r: parse_iso_datetime(r["scheduled_at"]))
     payload = {
         "date": day,
         "timezone": "Asia/Shanghai",
