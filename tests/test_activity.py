@@ -226,7 +226,14 @@ def test_skip_activity(client, auth_headers):
     assert resp.json()["skipped_reason"] == "开会"
 
 
-def test_postpone_creates_new_activity(client, auth_headers):
+def test_postpone_creates_new_activity(client, auth_headers, monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.activity import service
+
+    # 固定“现在”为北京时间 09:00：凌晨运行也不会因为当天没有剩余槽位而失败
+    monkeypatch.setattr(service, "utcnow", lambda: datetime(2026, 1, 1, 1, 0, tzinfo=UTC))
+
     # 使用全天窗口，避免在临近下午窗口结束时运行时找不到下一个槽。
     settings = dict(BASE_SETTINGS)
     settings.update(
